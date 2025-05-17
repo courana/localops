@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -26,6 +27,55 @@ type PodStatus struct {
 	IP        string
 	Node      string
 	Restarts  int32
+}
+
+// DeploymentStatus содержит информацию о состоянии деплоймента
+type DeploymentStatus struct {
+	Name                string
+	Namespace           string
+	Replicas            int32
+	ReadyReplicas       int32
+	UpdatedReplicas     int32
+	AvailableReplicas   int32
+	UnavailableReplicas int32
+	Conditions          []string
+}
+
+// ServiceInfo содержит информацию о сервисе
+type ServiceInfo struct {
+	Name       string
+	Namespace  string
+	Type       string
+	ClusterIP  string
+	ExternalIP string
+	Ports      []string
+	Age        time.Duration
+}
+
+// IngressInfo содержит информацию об ингрессе
+type IngressInfo struct {
+	Name      string
+	Namespace string
+	Hosts     []string
+	Addresses []string
+	Age       time.Duration
+}
+
+// ConfigMapInfo содержит информацию о ConfigMap
+type ConfigMapInfo struct {
+	Name      string
+	Namespace string
+	Data      map[string]string
+	Age       time.Duration
+}
+
+// SecretInfo содержит информацию о Secret
+type SecretInfo struct {
+	Name      string
+	Namespace string
+	Type      string
+	Keys      []string
+	Age       time.Duration
 }
 
 // K8sAdapter предоставляет методы для работы с Kubernetes
@@ -204,4 +254,192 @@ func (k *K8sAdapter) DeleteResource(namespace, resourceType, name string) error 
 	default:
 		return fmt.Errorf("неподдерживаемый тип ресурса: %s", resourceType)
 	}
+}
+
+// GetDeploymentStatus возвращает статус деплоймента
+func (k *K8sAdapter) GetDeploymentStatus(namespace, name string) (*DeploymentStatus, error) {
+	deployment, err := k.clientset.AppsV1().Deployments(namespace).Get(k.ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении деплоймента: %w", err)
+	}
+
+	status := &DeploymentStatus{
+		Name:                deployment.Name,
+		Namespace:           deployment.Namespace,
+		Replicas:            *deployment.Spec.Replicas,
+		ReadyReplicas:       deployment.Status.ReadyReplicas,
+		UpdatedReplicas:     deployment.Status.UpdatedReplicas,
+		AvailableReplicas:   deployment.Status.AvailableReplicas,
+		UnavailableReplicas: deployment.Status.UnavailableReplicas,
+	}
+
+	// Добавляем условия деплоймента
+	for _, condition := range deployment.Status.Conditions {
+		status.Conditions = append(status.Conditions, fmt.Sprintf("%s: %s", condition.Type, condition.Status))
+	}
+
+	return status, nil
+}
+
+// GetServicesAndIngresses возвращает информацию о сервисах и ингрессах
+func (k *K8sAdapter) GetServicesAndIngresses(namespace string) ([]ServiceInfo, []IngressInfo, error) {
+	// Получаем список сервисов
+	services, err := k.clientset.CoreV1().Services(namespace).List(k.ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("ошибка при получении списка сервисов: %w", err)
+	}
+
+	var serviceInfos []ServiceInfo
+	for _, svc := range services.Items {
+		info := ServiceInfo{
+			Name:      svc.Name,
+			Namespace: svc.Namespace,
+			Type:      string(svc.Spec.Type),
+			ClusterIP: svc.Spec.ClusterIP,
+			Age:       time.Since(svc.CreationTimestamp.Time),
+		}
+
+		// Добавляем внешние IP
+		if svc.Spec.Type == "LoadBalancer" {
+			for _, ingress := range svc.Status.LoadBalancer.Ingress {
+				if ingress.IP != "" {
+					info.ExternalIP = ingress.IP
+				}
+			}
+		}
+
+		// Добавляем порты
+		for _, port := range svc.Spec.Ports {
+			info.Ports = append(info.Ports, fmt.Sprintf("%d/%s", port.Port, port.Protocol))
+		}
+
+		serviceInfos = append(serviceInfos, info)
+	}
+
+	// Получаем список ингрессов
+	ingresses, err := k.clientset.NetworkingV1().Ingresses(namespace).List(k.ctx, metav1.ListOptions{})
+	if err != nil {
+		return serviceInfos, nil, fmt.Errorf("ошибка при получении списка ингрессов: %w", err)
+	}
+
+	var ingressInfos []IngressInfo
+	for _, ing := range ingresses.Items {
+		info := IngressInfo{
+			Name:      ing.Name,
+			Namespace: ing.Namespace,
+			Age:       time.Since(ing.CreationTimestamp.Time),
+		}
+
+		// Добавляем хосты
+		for _, rule := range ing.Spec.Rules {
+			info.Hosts = append(info.Hosts, rule.Host)
+		}
+
+		// Добавляем адреса
+		for _, lb := range ing.Status.LoadBalancer.Ingress {
+			if lb.IP != "" {
+				info.Addresses = append(info.Addresses, lb.IP)
+			}
+			if lb.Hostname != "" {
+				info.Addresses = append(info.Addresses, lb.Hostname)
+			}
+		}
+
+		ingressInfos = append(ingressInfos, info)
+	}
+
+	return serviceInfos, ingressInfos, nil
+}
+
+// CreateOrUpdateConfigMap создает или обновляет ConfigMap
+func (k *K8sAdapter) CreateOrUpdateConfigMap(namespace, name string, data map[string]string) error {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: data,
+	}
+
+	_, err := k.clientset.CoreV1().ConfigMaps(namespace).Get(k.ctx, name, metav1.GetOptions{})
+	if err != nil {
+		// Если ConfigMap не существует, создаем его
+		_, err = k.clientset.CoreV1().ConfigMaps(namespace).Create(k.ctx, configMap, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("ошибка при создании ConfigMap: %w", err)
+		}
+	} else {
+		// Если ConfigMap существует, обновляем его
+		_, err = k.clientset.CoreV1().ConfigMaps(namespace).Update(k.ctx, configMap, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("ошибка при обновлении ConfigMap: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// CreateOrUpdateSecret создает или обновляет Secret
+func (k *K8sAdapter) CreateOrUpdateSecret(namespace, name, secretType string, data map[string][]byte) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Type: corev1.SecretType(secretType),
+		Data: data,
+	}
+
+	_, err := k.clientset.CoreV1().Secrets(namespace).Get(k.ctx, name, metav1.GetOptions{})
+	if err != nil {
+		// Если Secret не существует, создаем его
+		_, err = k.clientset.CoreV1().Secrets(namespace).Create(k.ctx, secret, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("ошибка при создании Secret: %w", err)
+		}
+	} else {
+		// Если Secret существует, обновляем его
+		_, err = k.clientset.CoreV1().Secrets(namespace).Update(k.ctx, secret, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("ошибка при обновлении Secret: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetConfigMapInfo возвращает информацию о ConfigMap
+func (k *K8sAdapter) GetConfigMapInfo(namespace, name string) (*ConfigMapInfo, error) {
+	configMap, err := k.clientset.CoreV1().ConfigMaps(namespace).Get(k.ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении ConfigMap: %w", err)
+	}
+
+	return &ConfigMapInfo{
+		Name:      configMap.Name,
+		Namespace: configMap.Namespace,
+		Data:      configMap.Data,
+		Age:       time.Since(configMap.CreationTimestamp.Time),
+	}, nil
+}
+
+// GetSecretInfo возвращает информацию о Secret
+func (k *K8sAdapter) GetSecretInfo(namespace, name string) (*SecretInfo, error) {
+	secret, err := k.clientset.CoreV1().Secrets(namespace).Get(k.ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении Secret: %w", err)
+	}
+
+	keys := make([]string, 0, len(secret.Data))
+	for key := range secret.Data {
+		keys = append(keys, key)
+	}
+
+	return &SecretInfo{
+		Name:      secret.Name,
+		Namespace: secret.Namespace,
+		Type:      string(secret.Type),
+		Keys:      keys,
+		Age:       time.Since(secret.CreationTimestamp.Time),
+	}, nil
 }

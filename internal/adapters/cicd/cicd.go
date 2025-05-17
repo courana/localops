@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -45,6 +47,17 @@ type gitlabPipeline struct {
 		Author  string `json:"author_name"`
 	} `json:"commit"`
 	Ref string `json:"ref"`
+}
+
+// PipelineJob содержит информацию о задаче в пайплайне
+type PipelineJob struct {
+	ID        string
+	Name      string
+	Status    string
+	Stage     string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Duration  time.Duration
 }
 
 // CICDAdapter предоставляет методы для работы с CICD системой
@@ -163,4 +176,69 @@ func (a *CICDAdapter) GetPipelineStatus(ctx context.Context, project string, pip
 		Author:    glPipeline.Commit.Author,
 		Message:   glPipeline.Commit.Message,
 	}, nil
+}
+
+// ListPipelineJobs возвращает список задач в пайплайне
+func (c *CICDAdapter) ListPipelineJobs(ctx context.Context, projectID, pipelineID string) ([]PipelineJob, error) {
+	// Здесь должна быть реализация получения списка задач
+	// Для примера возвращаем заглушку
+	return []PipelineJob{
+		{
+			ID:        "job1",
+			Name:      "build",
+			Status:    "success",
+			Stage:     "build",
+			StartedAt: time.Now().Add(-time.Hour),
+			EndedAt:   time.Now(),
+			Duration:  time.Hour,
+		},
+	}, nil
+}
+
+// GetJobLogs возвращает логи задачи
+func (c *CICDAdapter) GetJobLogs(ctx context.Context, projectID, jobID string) (string, error) {
+	// Здесь должна быть реализация получения логов
+	// Для примера возвращаем заглушку
+	return "Build started...\nBuild completed successfully", nil
+}
+
+// CancelPipeline отменяет выполняющийся пайплайн
+func (c *CICDAdapter) CancelPipeline(ctx context.Context, projectID, pipelineID string) error {
+	// Здесь должна быть реализация отмены пайплайна
+	return nil
+}
+
+// RetryPipeline перезапускает упавший пайплайн
+func (c *CICDAdapter) RetryPipeline(ctx context.Context, projectID, pipelineID string) error {
+	// Здесь должна быть реализация перезапуска пайплайна
+	return nil
+}
+
+// DownloadArtifacts скачивает артефакты сборки
+func (c *CICDAdapter) DownloadArtifacts(ctx context.Context, projectID, jobID, outputPath string) error {
+	// Здесь должна быть реализация скачивания артефактов
+	// Для примера создаем пустой файл
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("ошибка при создании директории: %w", err)
+	}
+
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("ошибка при создании файла: %w", err)
+	}
+	defer file.Close()
+
+	return nil
+}
+
+// Pipeline содержит информацию о пайплайне
+type Pipeline struct {
+	ID        string
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Duration  time.Duration
+	Author    string
+	Message   string
 }

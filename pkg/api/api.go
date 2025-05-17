@@ -32,7 +32,23 @@ func RecoverMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func NewAPI(dockerAdapter, k8sAdapter, ciAdapter interface{}) http.Handler {
+// ContainerOptions содержит параметры для запуска контейнера
+type ContainerOptions struct {
+	Image   string            `json:"image"`
+	Name    string            `json:"name,omitempty"`
+	Ports   []PortMapping     `json:"ports,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Volumes map[string]string `json:"volumes,omitempty"`
+	Network string            `json:"network,omitempty"`
+}
+
+// PortMapping описывает маппинг портов
+type PortMapping struct {
+	HostPort      int `json:"hostPort"`
+	ContainerPort int `json:"containerPort"`
+}
+
+func NewAPI(dockerAdapter, k8sAdapter, ciAdapter, monitoringAdapter interface{}) http.Handler {
 	wsContainer := restful.NewContainer()
 
 	// Docker endpoints
@@ -41,18 +57,29 @@ func NewAPI(dockerAdapter, k8sAdapter, ciAdapter interface{}) http.Handler {
 		Path("/api/docker").
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON)
+
+	// Docker ping
 	dockerWS.Route(dockerWS.GET("/ping").To(dockerPingHandler).Doc("Ping Docker").Operation("dockerPing"))
-	// Добавьте другие docker endpoints здесь
+
+	// Docker containers
+	dockerWS.Route(dockerWS.GET("/containers").To(dockerListContainersHandler).Doc("List Docker Containers").Operation("dockerListContainers"))
+	dockerWS.Route(dockerWS.POST("/containers").To(dockerRunContainerHandler).Doc("Run Docker Container").Operation("dockerRunContainer"))
+
+	// Docker images
+	dockerWS.Route(dockerWS.POST("/pull").To(dockerPullImageHandler).Doc("Pull Docker Image").Operation("dockerPullImage"))
+
 	wsContainer.Add(dockerWS)
 
 	// K8s endpoints
 	k8sWS := new(restful.WebService)
 	k8sWS.
 		Path("/api/k8s").
-		Consumes(restful.MIME_JSON).
+		Consumes(restful.MIME_JSON, "application/yaml").
 		Produces(restful.MIME_JSON)
+
 	k8sWS.Route(k8sWS.GET("/ping").To(k8sPingHandler).Doc("Ping K8s").Operation("k8sPing"))
-	// Добавьте другие k8s endpoints здесь
+	k8sWS.Route(k8sWS.POST("/deploy").To(k8sDeployHandler).Doc("Deploy to Kubernetes").Operation("k8sDeploy"))
+
 	wsContainer.Add(k8sWS)
 
 	// CI/CD endpoints
@@ -61,12 +88,18 @@ func NewAPI(dockerAdapter, k8sAdapter, ciAdapter interface{}) http.Handler {
 		Path("/api/ci").
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON)
+
 	ciWS.Route(ciWS.GET("/ping").To(ciPingHandler).Doc("Ping CI").Operation("ciPing"))
-	// Добавьте другие ci endpoints здесь
+	ciWS.Route(ciWS.POST("/trigger").To(ciTriggerHandler).Doc("Trigger CI Pipeline").Operation("ciTrigger"))
+
 	wsContainer.Add(ciWS)
 
 	// Metrics endpoint (Prometheus)
-	wsContainer.Handle("/metrics", http.HandlerFunc(metricsHandler))
+	if monitoringAdapter != nil {
+		if handler, ok := monitoringAdapter.(interface{ MetricsHandler() http.Handler }); ok {
+			wsContainer.Handle("/metrics", handler.MetricsHandler())
+		}
+	}
 
 	// Настройка OpenAPI
 	config := restfulspec.Config{
@@ -93,24 +126,98 @@ func enrichSwaggerObject(swo *spec.Swagger) {
 	}
 }
 
-// --- Handlers-заглушки ---
+// --- Handlers ---
 
 func dockerPingHandler(req *restful.Request, resp *restful.Response) {
-	// Здесь вызываем соответствующий адаптер
 	resp.WriteEntity(map[string]string{"status": "docker pong"})
 }
 
+func dockerListContainersHandler(req *restful.Request, resp *restful.Response) {
+	resp.WriteEntity([]map[string]string{
+		{
+			"id":     "container1",
+			"name":   "test-container-1",
+			"status": "running",
+		},
+		{
+			"id":     "container2",
+			"name":   "test-container-2",
+			"status": "stopped",
+		},
+	})
+}
+
+func dockerPullImageHandler(req *restful.Request, resp *restful.Response) {
+	image := req.QueryParameter("image")
+	if image == "" {
+		resp.WriteErrorString(http.StatusBadRequest, "image parameter is required")
+		return
+	}
+
+	// Здесь будет реальная логика скачивания образа
+	resp.WriteEntity(map[string]string{
+		"status": "success",
+		"image":  image,
+	})
+}
+
+func dockerRunContainerHandler(req *restful.Request, resp *restful.Response) {
+	var opts ContainerOptions
+	err := req.ReadEntity(&opts)
+	if err != nil {
+		resp.WriteErrorString(http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Здесь будет реальная логика запуска контейнера
+	resp.WriteEntity(map[string]string{
+		"status":    "success",
+		"container": opts.Name,
+	})
+}
+
 func k8sPingHandler(req *restful.Request, resp *restful.Response) {
-	// Здесь вызываем соответствующий адаптер
 	resp.WriteEntity(map[string]string{"status": "k8s pong"})
 }
 
+func k8sDeployHandler(req *restful.Request, resp *restful.Response) {
+	namespace := req.QueryParameter("namespace")
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	manifest := req.Request.Body
+	if manifest == nil {
+		resp.WriteErrorString(http.StatusBadRequest, "manifest is required")
+		return
+	}
+
+	// Здесь будет реальная логика деплоя в Kubernetes
+	resp.WriteEntity(map[string]string{
+		"status":    "success",
+		"namespace": namespace,
+	})
+}
+
 func ciPingHandler(req *restful.Request, resp *restful.Response) {
-	// Здесь вызываем соответствующий адаптер
 	resp.WriteEntity(map[string]string{"status": "ci pong"})
 }
 
-func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("metrics endpoint"))
+func ciTriggerHandler(req *restful.Request, resp *restful.Response) {
+	var trigger struct {
+		Project string `json:"project"`
+		Ref     string `json:"ref"`
+	}
+	err := req.ReadEntity(&trigger)
+	if err != nil {
+		resp.WriteErrorString(http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Здесь будет реальная логика запуска CI/CD пайплайна
+	resp.WriteEntity(map[string]string{
+		"status":  "success",
+		"project": trigger.Project,
+		"ref":     trigger.Ref,
+	})
 }
