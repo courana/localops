@@ -1,0 +1,8 @@
+linters:
+  enable:
+    - govet
+    - gosimple
+    - staticcheck
+
+run:
+  deadline: 5m 

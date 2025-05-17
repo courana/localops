@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-manager
+  labels:
+    app: devops-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devops-manager
+  template:
+    metadata:
+      labels:
+        app: devops-manager
+    spec:
+      containers:
+      - name: devops-manager
+        image: devops-manager:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: CONFIG_MAP_KEY
+          valueFrom:
+            configMapKeyRef:
+              name: devops-manager-config
+              key: config_key
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: devops-manager-secret
+              key: secret_key 

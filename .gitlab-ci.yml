@@ -1,0 +1,47 @@
+stages:
+  - lint
+  - test
+  - build
+  - docker-build-push
+  - deploy-k8s
+
+lint:
+  stage: lint
+  image: golang:1.21-alpine
+  script:
+    - go get -u golang.org/x/lint/golint
+    - golint ./...
+
+test:
+  stage: test
+  image: golang:1.21-alpine
+  script:
+    - go test -v ./...
+
+build:
+  stage: build
+  image: golang:1.21-alpine
+  script:
+    - go build -o devops-manager ./cmd/main.go
+  artifacts:
+    paths:
+      - devops-manager
+
+docker-build-push:
+  stage: docker-build-push
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t devops-manager:latest .
+    - docker push devops-manager:latest
+  only:
+    - main
+
+deploy-k8s:
+  stage: deploy-k8s
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl apply -f deploy/
+  only:
+    - main 
