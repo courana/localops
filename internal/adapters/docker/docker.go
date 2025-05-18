@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	"github.com/localops/devops-manager/internal/adapters/monitoring"
 	"github.com/pkg/errors"
 )
 
@@ -57,21 +58,23 @@ type ImageInfo struct {
 
 // DockerAdapter предоставляет методы для работы с Docker
 type DockerAdapter struct {
-	client   *client.Client
-	ctx      context.Context
-	registry *RegistryAdapter
+	client     *client.Client
+	ctx        context.Context
+	registry   *RegistryAdapter
+	monitoring *monitoring.MonitoringAdapter
 }
 
 // NewDockerAdapter создает новый экземпляр DockerAdapter
-func NewDockerAdapter(registryConfig *RegistryConfig) (*DockerAdapter, error) {
+func NewDockerAdapter(registryConfig *RegistryConfig, monitoring *monitoring.MonitoringAdapter) (*DockerAdapter, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "ошибка при создании Docker клиента")
 	}
 
 	adapter := &DockerAdapter{
-		client: cli,
-		ctx:    context.Background(),
+		client:     cli,
+		ctx:        context.Background(),
+		monitoring: monitoring,
 	}
 
 	if registryConfig != nil {
@@ -98,136 +101,70 @@ func (d *DockerAdapter) PullImage(image string) error {
 	return nil
 }
 
-// BuildImage собирает Docker образ из Dockerfile
+// BuildImage собирает Docker образ
 func (d *DockerAdapter) BuildImage(path string, tag string, buildArgs map[string]*string) error {
-	// Формируем команду для сборки
-	args := []string{"build", "-t", tag}
+	start := time.Now()
+	err := d.buildImage(path, tag, buildArgs)
+	duration := time.Since(start)
 
-	// Добавляем build-аргументы
-	for k, v := range buildArgs {
-		if v != nil {
-			args = append(args, "--build-arg", fmt.Sprintf("%s=%s", k, *v))
-		}
+	status := "success"
+	if err != nil {
+		status = "error"
 	}
 
-	// Добавляем путь к контексту сборки
-	args = append(args, path)
-
-	// Создаем команду
-	cmd := exec.Command("docker", args...)
-
-	// Перенаправляем вывод
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Запускаем сборку
-	if err := cmd.Run(); err != nil {
-		return errors.Wrap(err, "ошибка при сборке образа")
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("build_image", status, duration)
 	}
 
-	return nil
+	return err
 }
 
-// RunContainer запускает новый контейнер
+// RunContainer создает и запускает контейнер
 func (d *DockerAdapter) RunContainer(opts ContainerOptions) (*ContainerInfo, error) {
-	// Создаем конфигурацию контейнера
-	config := &container.Config{
-		Image:  opts.Image,
-		Env:    make([]string, 0, len(opts.Environment)),
-		Cmd:    opts.Command,
-		Labels: opts.Labels,
-	}
+	start := time.Now()
+	container, err := d.runContainer(opts)
+	duration := time.Since(start)
 
-	// Добавляем переменные окружения
-	for k, v := range opts.Environment {
-		config.Env = append(config.Env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	// Создаем хост-конфигурацию
-	hostConfig := &container.HostConfig{
-		PortBindings:  make(map[nat.Port][]nat.PortBinding),
-		Binds:         make([]string, 0, len(opts.Volumes)),
-		RestartPolicy: opts.RestartPolicy,
-	}
-
-	// Настраиваем порты
-	for containerPort, hostPort := range opts.Ports {
-		port, err := nat.NewPort("tcp", containerPort)
-		if err != nil {
-			return nil, errors.Wrap(err, "ошибка при парсинге порта контейнера")
-		}
-		hostConfig.PortBindings[port] = []nat.PortBinding{
-			{HostPort: hostPort},
-		}
-	}
-
-	// Настраиваем тома
-	for hostPath, containerPath := range opts.Volumes {
-		hostConfig.Binds = append(hostConfig.Binds, fmt.Sprintf("%s:%s", hostPath, containerPath))
-	}
-
-	// Создаем контейнер
-	resp, err := d.client.ContainerCreate(
-		d.ctx,
-		config,
-		hostConfig,
-		&network.NetworkingConfig{},
-		nil,
-		opts.Name,
-	)
+	status := "success"
 	if err != nil {
-		return nil, errors.Wrap(err, "ошибка при создании контейнера")
+		status = "error"
 	}
 
-	// Запускаем контейнер
-	if err := d.client.ContainerStart(d.ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
-		// Если не удалось запустить, удаляем контейнер
-		_ = d.client.ContainerRemove(d.ctx, resp.ID, types.ContainerRemoveOptions{Force: true})
-		return nil, errors.Wrap(err, "ошибка при запуске контейнера")
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("run_container", status, duration)
 	}
 
-	// Получаем информацию о контейнере
-	container, err := d.client.ContainerInspect(d.ctx, resp.ID)
-	if err != nil {
-		return nil, errors.Wrap(err, "ошибка при получении информации о контейнере")
-	}
-
-	// Парсим время создания
-	created, err := time.Parse(time.RFC3339Nano, container.Created)
-	if err != nil {
-		return nil, errors.Wrap(err, "ошибка при парсинге времени создания контейнера")
-	}
-
-	return &ContainerInfo{
-		ID:      container.ID,
-		Name:    container.Name,
-		Image:   container.Config.Image,
-		Status:  container.State.Status,
-		Created: created,
-		State:   container.State.Status,
-		Labels:  container.Config.Labels,
-	}, nil
+	return container, err
 }
 
 // ListContainers возвращает список всех контейнеров
 func (d *DockerAdapter) ListContainers() ([]ContainerInfo, error) {
+	start := time.Now()
 	containers, err := d.client.ContainerList(d.ctx, types.ContainerListOptions{All: true})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("list_containers", status, duration)
+	}
+
 	if err != nil {
 		return nil, errors.Wrap(err, "ошибка при получении списка контейнеров")
 	}
 
 	var result []ContainerInfo
-	for _, container := range containers {
-		info := ContainerInfo{
-			ID:      container.ID,
-			Name:    container.Names[0],
-			Image:   container.Image,
-			Status:  container.Status,
-			Created: time.Unix(container.Created, 0),
-			State:   container.State,
-			Labels:  container.Labels,
-		}
-		result = append(result, info)
+	for _, c := range containers {
+		result = append(result, ContainerInfo{
+			ID:      c.ID,
+			Name:    strings.TrimPrefix(c.Names[0], "/"),
+			Image:   c.Image,
+			Status:  c.Status,
+			Created: time.Unix(c.Created, 0),
+		})
 	}
 
 	return result, nil
@@ -235,26 +172,59 @@ func (d *DockerAdapter) ListContainers() ([]ContainerInfo, error) {
 
 // StopContainer останавливает контейнер
 func (d *DockerAdapter) StopContainer(containerID string) error {
-	timeout := 10 * time.Second
-	if err := d.client.ContainerStop(d.ctx, containerID, &timeout); err != nil {
-		return errors.Wrap(err, "ошибка при остановке контейнера")
+	start := time.Now()
+	err := d.stopContainer(containerID)
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
 	}
-	return nil
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("stop_container", status, duration)
+	}
+
+	return err
 }
 
 // RemoveContainer удаляет контейнер
 func (d *DockerAdapter) RemoveContainer(containerID string) error {
-	if err := d.client.ContainerRemove(d.ctx, containerID, types.ContainerRemoveOptions{
-		Force: true,
-	}); err != nil {
+	start := time.Now()
+	err := d.client.ContainerRemove(d.ctx, containerID, types.ContainerRemoveOptions{Force: true})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("remove_container", status, duration)
+	}
+
+	if err != nil {
 		return errors.Wrap(err, "ошибка при удалении контейнера")
 	}
+
 	return nil
 }
 
 // ListImages возвращает список всех образов
 func (d *DockerAdapter) ListImages() ([]ImageInfo, error) {
+	start := time.Now()
 	images, err := d.client.ImageList(d.ctx, types.ImageListOptions{})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("list_images", status, duration)
+	}
+
 	if err != nil {
 		return nil, errors.Wrap(err, "ошибка при получении списка образов")
 	}
@@ -276,10 +246,22 @@ func (d *DockerAdapter) ListImages() ([]ImageInfo, error) {
 
 // RemoveImage удаляет образ
 func (d *DockerAdapter) RemoveImage(imageID string) error {
+	start := time.Now()
 	_, err := d.client.ImageRemove(d.ctx, imageID, types.ImageRemoveOptions{
 		Force:         true,
 		PruneChildren: true,
 	})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("remove_image", status, duration)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "ошибка при удалении образа")
 	}
@@ -288,15 +270,31 @@ func (d *DockerAdapter) RemoveImage(imageID string) error {
 
 // GetContainerLogs возвращает логи контейнера
 func (d *DockerAdapter) GetContainerLogs(containerID string, since time.Time, tail string) (io.ReadCloser, error) {
+	start := time.Now()
 	options := types.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Since:      since.Format(time.RFC3339),
-		Tail:       tail,
 		Timestamps: true,
 	}
 
-	return d.client.ContainerLogs(d.ctx, containerID, options)
+	logs, err := d.client.ContainerLogs(d.ctx, containerID, options)
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("get_logs", status, duration)
+	}
+
+	if err != nil {
+		return nil, errors.Wrap(err, "ошибка при получении логов контейнера")
+	}
+
+	return logs, nil
 }
 
 // GetContainerStats возвращает статистику контейнера
@@ -317,10 +315,22 @@ func (d *DockerAdapter) GetContainerStats(containerID string) (*types.Stats, err
 
 // CreateNetwork создает новую сеть
 func (d *DockerAdapter) CreateNetwork(name string, driver string, options map[string]string) (string, error) {
+	start := time.Now()
 	resp, err := d.client.NetworkCreate(d.ctx, name, types.NetworkCreate{
 		Driver:  driver,
 		Options: options,
 	})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("create_network", status, duration)
+	}
+
 	if err != nil {
 		return "", errors.Wrap(err, "ошибка при создании сети")
 	}
@@ -329,16 +339,49 @@ func (d *DockerAdapter) CreateNetwork(name string, driver string, options map[st
 
 // ConnectContainerToNetwork подключает контейнер к сети
 func (d *DockerAdapter) ConnectContainerToNetwork(containerID string, networkID string) error {
-	return d.client.NetworkConnect(d.ctx, networkID, containerID, &network.EndpointSettings{})
+	start := time.Now()
+	err := d.client.NetworkConnect(d.ctx, networkID, containerID, &network.EndpointSettings{})
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("connect_network", status, duration)
+	}
+
+	if err != nil {
+		return errors.Wrap(err, "ошибка при подключении контейнера к сети")
+	}
+	return nil
 }
 
 // DisconnectContainerFromNetwork отключает контейнер от сети
 func (d *DockerAdapter) DisconnectContainerFromNetwork(containerID string, networkID string) error {
-	return d.client.NetworkDisconnect(d.ctx, networkID, containerID, true)
+	start := time.Now()
+	err := d.client.NetworkDisconnect(d.ctx, networkID, containerID, true)
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("disconnect_network", status, duration)
+	}
+
+	if err != nil {
+		return errors.Wrap(err, "ошибка при отключении контейнера от сети")
+	}
+	return nil
 }
 
 // PruneSystem очищает неиспользуемые ресурсы
 func (d *DockerAdapter) PruneSystem() error {
+	start := time.Now()
 	_, err := d.client.ContainersPrune(d.ctx, filters.Args{})
 	if err != nil {
 		return errors.Wrap(err, "ошибка при очистке контейнеров")
@@ -352,6 +395,16 @@ func (d *DockerAdapter) PruneSystem() error {
 	_, err = d.client.NetworksPrune(d.ctx, filters.Args{})
 	if err != nil {
 		return errors.Wrap(err, "ошибка при очистке сетей")
+	}
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("prune_system", status, duration)
 	}
 
 	return nil
@@ -487,7 +540,20 @@ func (d *DockerAdapter) GetSystemInfo() (*types.Info, error) {
 
 // StartContainer запускает существующий контейнер
 func (d *DockerAdapter) StartContainer(containerID string) error {
-	return d.client.ContainerStart(d.ctx, containerID, types.ContainerStartOptions{})
+	start := time.Now()
+	err := d.startContainer(containerID)
+	duration := time.Since(start)
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	if d.monitoring != nil {
+		d.monitoring.RecordDockerOperation("start_container", status, duration)
+	}
+
+	return err
 }
 
 // GetContainerIDByName возвращает ID контейнера по его имени
@@ -507,4 +573,122 @@ func (d *DockerAdapter) GetContainerIDByName(name string) (string, error) {
 	}
 
 	return "", errors.New("контейнер с указанным именем не найден")
+}
+
+// buildImage собирает Docker образ
+func (d *DockerAdapter) buildImage(path string, tag string, buildArgs map[string]*string) error {
+	// Формируем команду для сборки
+	args := []string{"build", "-t", tag}
+
+	// Добавляем build-аргументы
+	for k, v := range buildArgs {
+		if v != nil {
+			args = append(args, "--build-arg", fmt.Sprintf("%s=%s", k, *v))
+		}
+	}
+
+	// Добавляем путь к контексту сборки
+	args = append(args, path)
+
+	// Создаем команду
+	cmd := exec.Command("docker", args...)
+
+	// Перенаправляем вывод
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Запускаем сборку
+	return cmd.Run()
+}
+
+// runContainer создает и запускает контейнер
+func (d *DockerAdapter) runContainer(opts ContainerOptions) (*ContainerInfo, error) {
+	// Создаем конфигурацию контейнера
+	config := &container.Config{
+		Image:  opts.Image,
+		Env:    make([]string, 0, len(opts.Environment)),
+		Cmd:    opts.Command,
+		Labels: opts.Labels,
+	}
+
+	// Добавляем переменные окружения
+	for k, v := range opts.Environment {
+		config.Env = append(config.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Создаем хост-конфигурацию
+	hostConfig := &container.HostConfig{
+		PortBindings:  make(map[nat.Port][]nat.PortBinding),
+		Binds:         make([]string, 0, len(opts.Volumes)),
+		RestartPolicy: opts.RestartPolicy,
+	}
+
+	// Настраиваем порты
+	for containerPort, hostPort := range opts.Ports {
+		port, err := nat.NewPort("tcp", containerPort)
+		if err != nil {
+			return nil, errors.Wrap(err, "ошибка при парсинге порта контейнера")
+		}
+		hostConfig.PortBindings[port] = []nat.PortBinding{
+			{HostPort: hostPort},
+		}
+	}
+
+	// Настраиваем тома
+	for hostPath, containerPath := range opts.Volumes {
+		hostConfig.Binds = append(hostConfig.Binds, fmt.Sprintf("%s:%s", hostPath, containerPath))
+	}
+
+	// Создаем контейнер
+	resp, err := d.client.ContainerCreate(
+		d.ctx,
+		config,
+		hostConfig,
+		&network.NetworkingConfig{},
+		nil,
+		opts.Name,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "ошибка при создании контейнера")
+	}
+
+	// Запускаем контейнер
+	if err := d.client.ContainerStart(d.ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
+		// Если не удалось запустить, удаляем контейнер
+		_ = d.client.ContainerRemove(d.ctx, resp.ID, types.ContainerRemoveOptions{Force: true})
+		return nil, errors.Wrap(err, "ошибка при запуске контейнера")
+	}
+
+	// Получаем информацию о контейнере
+	container, err := d.client.ContainerInspect(d.ctx, resp.ID)
+	if err != nil {
+		return nil, errors.Wrap(err, "ошибка при получении информации о контейнере")
+	}
+
+	// Парсим время создания
+	created, err := time.Parse(time.RFC3339Nano, container.Created)
+	if err != nil {
+		return nil, errors.Wrap(err, "ошибка при парсинге времени создания контейнера")
+	}
+
+	return &ContainerInfo{
+		ID:      container.ID,
+		Name:    container.Name,
+		Image:   container.Config.Image,
+		Status:  container.State.Status,
+		Created: created,
+		State:   container.State.Status,
+		Labels:  container.Config.Labels,
+	}, nil
+}
+
+// startContainer запускает существующий контейнер
+func (d *DockerAdapter) startContainer(containerID string) error {
+	return d.client.ContainerStart(d.ctx, containerID, types.ContainerStartOptions{})
+}
+
+// stopContainer останавливает контейнер
+func (d *DockerAdapter) stopContainer(containerID string) error {
+	timeout := 10 * time.Second
+	return d.client.ContainerStop(d.ctx, containerID, &timeout)
 }

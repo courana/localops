@@ -2,11 +2,14 @@ package monitoring
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -14,6 +17,7 @@ import (
 type Config struct {
 	Namespace string
 	Subsystem string
+	Port      int
 }
 
 // MetricValue представляет значение метрики
@@ -41,22 +45,81 @@ type MonitoringAdapter struct {
 	counters map[string]*prometheus.CounterVec
 	// Гистограммы
 	histograms map[string]*prometheus.HistogramVec
+	// HTTP сервер
+	server *http.Server
 }
 
 // NewMonitoringAdapter создает новый экземпляр MonitoringAdapter
 func NewMonitoringAdapter(config Config) *MonitoringAdapter {
-	return &MonitoringAdapter{
+	adapter := &MonitoringAdapter{
 		config:     config,
 		registry:   prometheus.NewRegistry(),
 		counters:   make(map[string]*prometheus.CounterVec),
 		histograms: make(map[string]*prometheus.HistogramVec),
 	}
+
+	// Регистрируем метрики для Docker операций
+	adapter.RegisterCounters(
+		[]string{
+			"docker_operations_total",
+			"docker_image_operations_total",
+			"docker_container_operations_total",
+			"docker_network_operations_total",
+		},
+		[]string{"operation", "status"},
+	)
+
+	// Регистрируем метрики для Kubernetes операций
+	adapter.RegisterCounters(
+		[]string{
+			"kubernetes_operations_total",
+			"kubernetes_resource_operations_total",
+		},
+		[]string{"operation", "resource_type", "status"},
+	)
+
+	// Регистрируем метрики для CI/CD операций
+	adapter.RegisterCounters(
+		[]string{
+			"cicd_operations_total",
+			"cicd_pipeline_operations_total",
+		},
+		[]string{"operation", "status"},
+	)
+
+	// Регистрируем гистограммы для длительности операций
+	adapter.RegisterHistograms(
+		[]string{
+			"docker_operation_duration_seconds",
+			"kubernetes_operation_duration_seconds",
+			"cicd_operation_duration_seconds",
+		},
+		[]string{"operation"},
+		[]float64{0.1, 0.5, 1.0, 2.0, 5.0},
+	)
+
+	// Запускаем HTTP сервер для метрик
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(adapter.registry, promhttp.HandlerOpts{}))
+
+	adapter.server = &http.Server{
+		Addr:    fmt.Sprintf(":%d", config.Port),
+		Handler: mux,
+	}
+
+	go func() {
+		if err := adapter.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("Ошибка запуска HTTP сервера: %v\n", err)
+		}
+	}()
+
+	return adapter
 }
 
 // RegisterCounters регистрирует счетчики с заданными именами и метками
 func (a *MonitoringAdapter) RegisterCounters(names []string, labels []string) {
 	for _, name := range names {
-		a.counters[name] = promauto.NewCounterVec(
+		a.counters[name] = prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: a.config.Namespace,
 				Subsystem: a.config.Subsystem,
@@ -65,13 +128,14 @@ func (a *MonitoringAdapter) RegisterCounters(names []string, labels []string) {
 			},
 			labels,
 		)
+		a.registry.MustRegister(a.counters[name])
 	}
 }
 
 // RegisterHistograms регистрирует гистограммы с заданными именами и метками
 func (a *MonitoringAdapter) RegisterHistograms(names []string, labels []string, buckets []float64) {
 	for _, name := range names {
-		a.histograms[name] = promauto.NewHistogramVec(
+		a.histograms[name] = prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: a.config.Namespace,
 				Subsystem: a.config.Subsystem,
@@ -81,6 +145,7 @@ func (a *MonitoringAdapter) RegisterHistograms(names []string, labels []string, 
 			},
 			labels,
 		)
+		a.registry.MustRegister(a.histograms[name])
 	}
 }
 
@@ -105,35 +170,74 @@ func (a *MonitoringAdapter) MetricsHandler() http.Handler {
 
 // GetRawMetrics возвращает "сырые" метрики
 func (m *MonitoringAdapter) GetRawMetrics(ctx context.Context) (string, error) {
-	// Здесь должна быть реализация получения метрик
-	// Для примера возвращаем заглушку
-	return `# HELP http_requests_total Total number of HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{method="GET",path="/api"} 123
-http_requests_total{method="POST",path="/api"} 45
-# HELP http_request_duration_seconds HTTP request duration in seconds
-# TYPE http_request_duration_seconds histogram
-http_request_duration_seconds_bucket{le="0.1"} 100
-http_request_duration_seconds_bucket{le="0.5"} 200
-http_request_duration_seconds_bucket{le="1.0"} 300
-http_request_duration_seconds_bucket{le="+Inf"} 400`, nil
+	// Делаем HTTP запрос к локальному эндпоинту метрик
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", m.config.Port))
+	if err != nil {
+		return "", fmt.Errorf("ошибка при получении метрик: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("неожиданный статус ответа: %d", resp.StatusCode)
+	}
+
+	// Читаем тело ответа
+	metrics, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("ошибка при чтении метрик: %v", err)
+	}
+
+	return string(metrics), nil
 }
 
 // QueryMetric возвращает значение метрики за указанный период
 func (m *MonitoringAdapter) QueryMetric(ctx context.Context, name string, start, end time.Time) ([]MetricValue, error) {
-	// Здесь должна быть реализация запроса метрики
-	// Для примера возвращаем заглушку
-	return []MetricValue{
-		{
-			Name:      name,
-			Value:     123.45,
-			Timestamp: time.Now(),
-			Labels: map[string]string{
-				"instance": "localhost:8080",
-				"job":      "api",
-			},
-		},
-	}, nil
+	// Получаем все метрики
+	metrics, err := m.GetRawMetrics(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении метрик: %v", err)
+	}
+
+	// Парсим метрики
+	var values []MetricValue
+	lines := strings.Split(metrics, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, name) && !strings.HasPrefix(line, "#") {
+			parts := strings.Split(line, " ")
+			if len(parts) >= 2 {
+				value, err := strconv.ParseFloat(parts[1], 64)
+				if err != nil {
+					continue
+				}
+
+				// Извлекаем метки из строки метрики
+				labels := make(map[string]string)
+				if strings.Contains(line, "{") {
+					labelsStr := strings.Split(strings.Split(line, "{")[1], "}")[0]
+					labelPairs := strings.Split(labelsStr, ",")
+					for _, pair := range labelPairs {
+						kv := strings.Split(pair, "=")
+						if len(kv) == 2 {
+							labels[kv[0]] = strings.Trim(kv[1], "\"")
+						}
+					}
+				}
+
+				values = append(values, MetricValue{
+					Name:      name,
+					Value:     value,
+					Timestamp: time.Now(),
+					Labels:    labels,
+				})
+			}
+		}
+	}
+
+	if len(values) == 0 {
+		return nil, fmt.Errorf("метрика %s не найдена", name)
+	}
+
+	return values, nil
 }
 
 // ListMetrics возвращает список зарегистрированных метрик
@@ -173,4 +277,38 @@ func (m *MonitoringAdapter) GetServiceHealth(ctx context.Context) ([]HealthCheck
 			Timestamp: time.Now(),
 		},
 	}, nil
+}
+
+// RecordDockerOperation записывает метрики для Docker операций
+func (a *MonitoringAdapter) RecordDockerOperation(operation string, status string, duration time.Duration) {
+	a.IncCounter("docker_operations_total", map[string]string{
+		"operation": operation,
+		"status":    status,
+	})
+	a.ObserveDuration("docker_operation_duration_seconds", duration, map[string]string{
+		"operation": operation,
+	})
+}
+
+// RecordKubernetesOperation записывает метрики для Kubernetes операций
+func (a *MonitoringAdapter) RecordKubernetesOperation(operation string, resourceType string, status string, duration time.Duration) {
+	a.IncCounter("kubernetes_operations_total", map[string]string{
+		"operation":     operation,
+		"resource_type": resourceType,
+		"status":        status,
+	})
+	a.ObserveDuration("kubernetes_operation_duration_seconds", duration, map[string]string{
+		"operation": operation,
+	})
+}
+
+// RecordCICDOperation записывает метрики для CI/CD операций
+func (a *MonitoringAdapter) RecordCICDOperation(operation string, status string, duration time.Duration) {
+	a.IncCounter("cicd_operations_total", map[string]string{
+		"operation": operation,
+		"status":    status,
+	})
+	a.ObserveDuration("cicd_operation_duration_seconds", duration, map[string]string{
+		"operation": operation,
+	})
 }

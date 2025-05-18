@@ -35,8 +35,15 @@ func NewMenu() (*Menu, error) {
 		Insecure: os.Getenv("DOCKER_REGISTRY_INSECURE") == "true",
 	}
 
+	// Инициализация Monitoring адаптера
+	monitoringAdapter := monitoring.NewMonitoringAdapter(monitoring.Config{
+		Namespace: "devops",
+		Subsystem: "manager",
+		Port:      9090,
+	})
+
 	// Инициализация Docker адаптера
-	dockerAdapter, err := docker.NewDockerAdapter(registryConfig)
+	dockerAdapter, err := docker.NewDockerAdapter(registryConfig, monitoringAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка при инициализации Docker адаптера: %v", err)
 	}
@@ -56,12 +63,6 @@ func NewMenu() (*Menu, error) {
 	cicdAdapter := cicd.NewCICDAdapter(cicd.Config{
 		BaseURL: os.Getenv("CICD_BASE_URL"),
 		Token:   os.Getenv("CICD_TOKEN"),
-	})
-
-	// Инициализация Monitoring адаптера
-	monitoringAdapter := monitoring.NewMonitoringAdapter(monitoring.Config{
-		Namespace: "devops",
-		Subsystem: "manager",
 	})
 
 	return &Menu{
@@ -1094,19 +1095,47 @@ func (m *Menu) queryMetric() {
 	fmt.Print("Введите имя метрики: ")
 	name := m.readInput()
 
-	fmt.Print("Введите начальное время (формат: 2006-01-02 15:04:05): ")
-	startStr := m.readInput()
-	start, err := time.Parse("2006-01-02 15:04:05", startStr)
-	if err != nil {
-		fmt.Println("Ошибка при разборе начального времени")
-		return
-	}
+	fmt.Println("\nВыберите временной диапазон:")
+	fmt.Println("1. Последние 5 минут")
+	fmt.Println("2. Последний час")
+	fmt.Println("3. Последние 24 часа")
+	fmt.Println("4. Указать свой диапазон")
+	fmt.Print("Выберите опцию: ")
 
-	fmt.Print("Введите конечное время (формат: 2006-01-02 15:04:05): ")
-	endStr := m.readInput()
-	end, err := time.Parse("2006-01-02 15:04:05", endStr)
-	if err != nil {
-		fmt.Println("Ошибка при разборе конечного времени")
+	choice := m.readInput()
+
+	var start, end time.Time
+	now := time.Now()
+
+	switch choice {
+	case "1":
+		start = now.Add(-5 * time.Minute)
+		end = now
+	case "2":
+		start = now.Add(-1 * time.Hour)
+		end = now
+	case "3":
+		start = now.Add(-24 * time.Hour)
+		end = now
+	case "4":
+		fmt.Print("Введите начальное время (формат: 2006-01-02 15:04:05): ")
+		startStr := m.readInput()
+		var err error
+		start, err = time.Parse("2006-01-02 15:04:05", startStr)
+		if err != nil {
+			fmt.Println("Ошибка при разборе начального времени")
+			return
+		}
+
+		fmt.Print("Введите конечное время (формат: 2006-01-02 15:04:05): ")
+		endStr := m.readInput()
+		end, err = time.Parse("2006-01-02 15:04:05", endStr)
+		if err != nil {
+			fmt.Println("Ошибка при разборе конечного времени")
+			return
+		}
+	default:
+		fmt.Println("Неверный выбор")
 		return
 	}
 
@@ -1116,9 +1145,18 @@ func (m *Menu) queryMetric() {
 		return
 	}
 
-	fmt.Printf("\nЗначения метрики %s:\n", name)
+	fmt.Printf("\nЗначения метрики %s за период с %s по %s:\n",
+		name,
+		start.Format("2006-01-02 15:04:05"),
+		end.Format("2006-01-02 15:04:05"))
+
+	if len(values) == 0 {
+		fmt.Println("Нет данных за указанный период")
+		return
+	}
+
 	for _, v := range values {
-		fmt.Printf("Время: %s\n", v.Timestamp.Format(time.RFC3339))
+		fmt.Printf("\nВремя: %s\n", v.Timestamp.Format("2006-01-02 15:04:05"))
 		fmt.Printf("Значение: %f\n", v.Value)
 		if len(v.Labels) > 0 {
 			fmt.Println("Метки:")
@@ -1131,16 +1169,32 @@ func (m *Menu) queryMetric() {
 }
 
 func (m *Menu) listMetrics() {
-	metrics, err := m.monitoringAdapter.ListMetrics(context.Background())
-	if err != nil {
-		fmt.Printf("Ошибка при получении списка метрик: %v\n", err)
-		return
-	}
-
 	fmt.Println("\nДоступные метрики:")
-	for _, metric := range metrics {
-		fmt.Printf("- %s\n", metric)
-	}
+	fmt.Println("\nDocker метрики:")
+	fmt.Println("- devops_manager_docker_operations_total - общее количество Docker операций")
+	fmt.Println("- devops_manager_docker_operation_duration_seconds - длительность Docker операций")
+	fmt.Println("- devops_manager_docker_image_operations_total - операции с образами")
+	fmt.Println("- devops_manager_docker_container_operations_total - операции с контейнерами")
+	fmt.Println("- devops_manager_docker_network_operations_total - операции с сетями")
+
+	fmt.Println("\nKubernetes метрики:")
+	fmt.Println("- devops_manager_kubernetes_operations_total - общее количество Kubernetes операций")
+	fmt.Println("- devops_manager_kubernetes_deployment_operations_total - операции с деплойментами")
+	fmt.Println("- devops_manager_kubernetes_pod_operations_total - операции с подами")
+	fmt.Println("- devops_manager_kubernetes_service_operations_total - операции с сервисами")
+
+	fmt.Println("\nCI/CD метрики:")
+	fmt.Println("- devops_manager_cicd_operations_total - общее количество CI/CD операций")
+	fmt.Println("- devops_manager_cicd_pipeline_operations_total - операции с пайплайнами")
+	fmt.Println("- devops_manager_cicd_job_operations_total - операции с задачами")
+
+	fmt.Println("\nСистемные метрики:")
+	fmt.Println("- devops_manager_http_requests_total - количество HTTP запросов")
+	fmt.Println("- devops_manager_http_request_duration_seconds - длительность HTTP запросов")
+	fmt.Println("- devops_manager_errors_total - количество ошибок")
+
+	fmt.Println("\nДля просмотра значений метрик используйте опцию 'Запрос метрики'")
+	fmt.Println("Для просмотра всех метрик используйте опцию 'Сырые метрики'")
 }
 
 func (m *Menu) showServiceHealth() {
