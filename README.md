@@ -1,66 +1,103 @@
-# DevOps Manager
+# DevOps Manager CLI
 
-## Описание проекта
-DevOps Manager — это микросервис, разработанный на Go, который предоставляет API для управления Docker-контейнерами, Kubernetes-ресурсами и CI/CD процессами. Он позволяет автоматизировать и упростить управление инфраструктурой и процессами разработки.
+Инструмент командной строки для управления Docker, Kubernetes, CI/CD и мониторингом.
 
-## Инструкция по сборке и запуску
+## Требования
 
-### Сборка
-1. Убедитесь, что у вас установлен Go (версия 1.21 или выше).
-2. Клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/localops/devops-manager.git
-   cd devops-manager
-   ```
-3. Соберите проект:
-   ```bash
-   go build -o devops-manager ./cmd/main.go
-   ```
+### Общие требования
+- Go 1.21 или выше
+- Git
 
-### Запуск
-1. Запустите приложение:
-   ```bash
-   ./devops-manager
-   ```
-
-### Примеры curl
-- **Проверка доступности Docker API**:
-  ```bash
-  curl -X GET http://localhost:8080/api/docker/ping
-  ```
-- **Проверка доступности Kubernetes API**:
-  ```bash
-  curl -X GET http://localhost:8080/api/k8s/ping
-  ```
-- **Проверка доступности CI/CD API**:
-  ```bash
-  curl -X GET http://localhost:8080/api/ci/ping
+### Docker
+- Docker Desktop
+- Запущенный Docker Engine
+- Опционально: Docker Registry
+  ```powershell
+  $env:DOCKER_REGISTRY_URL="ваш_registry_url"
+  $env:DOCKER_REGISTRY_USERNAME="ваш_username"
+  $env:DOCKER_REGISTRY_PASSWORD="ваш_password"
   ```
 
-## Описание config.yaml
-Файл `config.yaml` содержит конфигурацию для DevOps Manager. Пример структуры:
+### Kubernetes
+- Доступ к кластеру Kubernetes
+- Файл конфигурации `~/.kube/config`
+- Подготовленные манифесты (например, `test-deployment.yaml`)
+- Опционально: ConfigMap для конфигурации приложений
 
-```yaml
-docker:
-  host: "unix:///var/run/docker.sock"
-  version: "v1.41"
+### GitLab CI/CD
+- Токен доступа GitLab (Settings -> Access Tokens)
+- Переменные окружения:
+  ```powershell
+  $env:CICD_BASE_URL="https://gitlab.com"  # или URL вашего GitLab
+  $env:CICD_TOKEN="ваш_токен_доступа"
+  ```
+- Файл `.gitlab-ci.yml` (можно создать через программу)
 
-kubernetes:
-  config: "/path/to/kubeconfig"
-  namespace: "default"
+## Установка
 
-cicd:
-  base_url: "https://gitlab.example.com/api/v4"
-  token: "your-token"
+1. Клонируйте репозиторий:
+   ```bash
+   git clone https://github.com/courana/localops
+   ```
+
+2. Установите зависимости:
+   ```bash
+   go mod download
+   ```
+
+3. Скомпилируйте программу:
+   ```bash
+   go build -o devops-manager ./cmd/cli
+   ```
+
+## Возможности
+
+### 1. Управление Docker
+- Сборка Docker-образов
+- Управление контейнерами (создание, запуск, остановка, удаление)
+- Просмотр логов контейнеров
+- Управление Docker-сетями
+- Системное обслуживание (очистка, информация)
+
+### 2. Управление Kubernetes
+- Применение YAML-манифестов
+- Масштабирование деплойментов
+- Мониторинг статуса подов и деплойментов
+- Управление сервисами и ингрессами
+- Управление конфигурацией (ConfigMap)
+- Управление секретами
+- Удаление ресурсов
+
+### 3. Управление CI/CD (GitLab)
+- Запуск сборок
+- Мониторинг статуса сборок
+- Просмотр списка задач
+- Просмотр логов задач
+- Отмена и перезапуск сборок
+- Скачивание артефактов
+- Создание и настройка `.gitlab-ci.yml`
+
+### 4. Мониторинг
+- Просмотр сырых метрик
+- Запрос конкретных метрик
+- Просмотр списка доступных метрик
+- Проверка здоровья сервисов
+
+## Использование
+
+Запустите программу:
+```bash
+./devops-manager
 ```
 
-### Параметры
-- **docker**: настройки для Docker API.
-  - `host`: адрес Docker API.
-  - `version`: версия Docker API.
-- **kubernetes**: настройки для Kubernetes API.
-  - `config`: путь к файлу конфигурации Kubernetes.
-  - `namespace`: пространство имен для работы.
-- **cicd**: настройки для CI/CD API.
-  - `base_url`: базовый URL для API CI/CD.
-  - `token`: токен для аутентификации.
+### Основное меню
+1. Управление Docker-образами
+2. Управление контейнерами
+3. Управление Kubernetes
+4. Управление CI/CD
+5. Мониторинг
+0. Выход
+
+## Лицензия
+
+MIT

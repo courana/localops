@@ -1,12 +1,14 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -78,6 +80,33 @@ type SecretInfo struct {
 	Age       time.Duration
 }
 
+// NginxConfig содержит настройки nginx
+type NginxConfig struct {
+	WorkerProcesses   string
+	WorkerConnections string
+	KeepaliveTimeout  string
+	ServerName        string
+	RootPath          string
+	IndexFile         string
+}
+
+// ConfigMapListItem содержит базовую информацию о ConfigMap
+type ConfigMapListItem struct {
+	Name      string
+	Namespace string
+	Age       time.Duration
+	Keys      []string
+}
+
+// SecretListItem содержит базовую информацию о Secret
+type SecretListItem struct {
+	Name      string
+	Namespace string
+	Type      string
+	Age       time.Duration
+	Keys      []string
+}
+
 // K8sAdapter предоставляет методы для работы с Kubernetes
 type K8sAdapter struct {
 	clientset *kubernetes.Clientset
@@ -120,45 +149,56 @@ func (k *K8sAdapter) ApplyManifest(manifestPath string) error {
 		return fmt.Errorf("ошибка при чтении манифеста: %w", err)
 	}
 
-	// Декодируем YAML в Unstructured
-	obj := &unstructured.Unstructured{}
-	if err := yaml.Unmarshal(data, obj); err != nil {
-		return fmt.Errorf("ошибка при разборе YAML: %w", err)
-	}
+	// Разделяем манифест на отдельные ресурсы
+	resources := bytes.Split(data, []byte("---"))
 
-	// Получаем GVR (GroupVersionResource) для объекта
-	gvk := obj.GetObjectKind().GroupVersionKind()
-
-	// Создаем RESTMapper
-	discoveryClient := k.clientset.Discovery()
-	groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
-	if err != nil {
-		return fmt.Errorf("ошибка при получении API групп: %w", err)
-	}
-	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
-
-	// Получаем mapping для ресурса
-	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-	if err != nil {
-		return fmt.Errorf("ошибка при получении mapping: %w", err)
-	}
-
-	// Получаем dynamic client для конкретного ресурса
-	dynamicResource := k.dynamic.Resource(mapping.Resource)
-
-	// Проверяем существование ресурса
-	_, err = dynamicResource.Namespace(obj.GetNamespace()).Get(k.ctx, obj.GetName(), metav1.GetOptions{})
-	if err != nil {
-		// Если ресурс не существует, создаем его
-		_, err = dynamicResource.Namespace(obj.GetNamespace()).Create(k.ctx, obj, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("ошибка при создании ресурса: %w", err)
+	for _, resourceData := range resources {
+		if len(bytes.TrimSpace(resourceData)) == 0 {
+			continue
 		}
-	} else {
-		// Если ресурс существует, обновляем его
-		_, err = dynamicResource.Namespace(obj.GetNamespace()).Update(k.ctx, obj, metav1.UpdateOptions{})
+
+		// Декодируем YAML в Unstructured
+		obj := &unstructured.Unstructured{}
+		if err := yaml.Unmarshal(resourceData, obj); err != nil {
+			return fmt.Errorf("ошибка при разборе YAML: %w", err)
+		}
+
+		// Получаем GVR (GroupVersionResource) для объекта
+		gvk := obj.GetObjectKind().GroupVersionKind()
+
+		// Создаем RESTMapper
+		discoveryClient := k.clientset.Discovery()
+		groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
 		if err != nil {
-			return fmt.Errorf("ошибка при обновлении ресурса: %w", err)
+			return fmt.Errorf("ошибка при получении API групп: %w", err)
+		}
+		mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
+
+		// Получаем mapping для ресурса
+		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return fmt.Errorf("ошибка при получении mapping: %w", err)
+		}
+
+		// Получаем dynamic client для конкретного ресурса
+		dynamicResource := k.dynamic.Resource(mapping.Resource)
+
+		// Проверяем существование ресурса
+		_, err = dynamicResource.Namespace(obj.GetNamespace()).Get(k.ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			// Если ресурс не существует, создаем его
+			_, err = dynamicResource.Namespace(obj.GetNamespace()).Create(k.ctx, obj, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("ошибка при создании ресурса %s: %w", obj.GetName(), err)
+			}
+			fmt.Printf("Создан ресурс: %s/%s\n", obj.GetKind(), obj.GetName())
+		} else {
+			// Если ресурс существует, обновляем его
+			_, err = dynamicResource.Namespace(obj.GetNamespace()).Update(k.ctx, obj, metav1.UpdateOptions{})
+			if err != nil {
+				return fmt.Errorf("ошибка при обновлении ресурса %s: %w", obj.GetName(), err)
+			}
+			fmt.Printf("Обновлен ресурс: %s/%s\n", obj.GetKind(), obj.GetName())
 		}
 	}
 
@@ -251,6 +291,8 @@ func (k *K8sAdapter) DeleteResource(namespace, resourceType, name string) error 
 		return k.clientset.CoreV1().Services(namespace).Delete(k.ctx, name, metav1.DeleteOptions{})
 	case "pod":
 		return k.clientset.CoreV1().Pods(namespace).Delete(k.ctx, name, metav1.DeleteOptions{})
+	case "configmap":
+		return k.clientset.CoreV1().ConfigMaps(namespace).Delete(k.ctx, name, metav1.DeleteOptions{})
 	default:
 		return fmt.Errorf("неподдерживаемый тип ресурса: %s", resourceType)
 	}
@@ -300,7 +342,7 @@ func (k *K8sAdapter) GetServicesAndIngresses(namespace string) ([]ServiceInfo, [
 		}
 
 		// Добавляем внешние IP
-		if svc.Spec.Type == "LoadBalancer" {
+		if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
 			for _, ingress := range svc.Status.LoadBalancer.Ingress {
 				if ingress.IP != "" {
 					info.ExternalIP = ingress.IP
@@ -310,7 +352,11 @@ func (k *K8sAdapter) GetServicesAndIngresses(namespace string) ([]ServiceInfo, [
 
 		// Добавляем порты
 		for _, port := range svc.Spec.Ports {
-			info.Ports = append(info.Ports, fmt.Sprintf("%d/%s", port.Port, port.Protocol))
+			portStr := fmt.Sprintf("%d/%s", port.Port, port.Protocol)
+			if port.NodePort > 0 {
+				portStr = fmt.Sprintf("%s:%d", portStr, port.NodePort)
+			}
+			info.Ports = append(info.Ports, portStr)
 		}
 
 		serviceInfos = append(serviceInfos, info)
@@ -319,6 +365,10 @@ func (k *K8sAdapter) GetServicesAndIngresses(namespace string) ([]ServiceInfo, [
 	// Получаем список ингрессов
 	ingresses, err := k.clientset.NetworkingV1().Ingresses(namespace).List(k.ctx, metav1.ListOptions{})
 	if err != nil {
+		// Если ошибка связана с тем, что API не поддерживается, возвращаем только сервисы
+		if errors.IsNotFound(err) {
+			return serviceInfos, nil, nil
+		}
 		return serviceInfos, nil, fmt.Errorf("ошибка при получении списка ингрессов: %w", err)
 	}
 
@@ -332,7 +382,9 @@ func (k *K8sAdapter) GetServicesAndIngresses(namespace string) ([]ServiceInfo, [
 
 		// Добавляем хосты
 		for _, rule := range ing.Spec.Rules {
-			info.Hosts = append(info.Hosts, rule.Host)
+			if rule.Host != "" {
+				info.Hosts = append(info.Hosts, rule.Host)
+			}
 		}
 
 		// Добавляем адреса
@@ -442,4 +494,130 @@ func (k *K8sAdapter) GetSecretInfo(namespace, name string) (*SecretInfo, error) 
 		Keys:      keys,
 		Age:       time.Since(secret.CreationTimestamp.Time),
 	}, nil
+}
+
+// GetNginxConfig возвращает текущую конфигурацию nginx
+func (k *K8sAdapter) GetNginxConfig(namespace, configMapName string) (*NginxConfig, error) {
+	configMap, err := k.clientset.CoreV1().ConfigMaps(namespace).Get(k.ctx, configMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении ConfigMap: %w", err)
+	}
+
+	nginxConf := configMap.Data["nginx.conf"]
+	if nginxConf == "" {
+		return nil, fmt.Errorf("nginx.conf не найден в ConfigMap")
+	}
+
+	// Парсим конфигурацию
+	config := &NginxConfig{
+		WorkerProcesses:   "auto",
+		WorkerConnections: "1024",
+		KeepaliveTimeout:  "65",
+		ServerName:        "localhost",
+		RootPath:          "/usr/share/nginx/html",
+		IndexFile:         "index.html",
+	}
+
+	// TODO: Добавить парсинг конфигурации из nginxConf
+
+	return config, nil
+}
+
+// UpdateNginxConfig обновляет конфигурацию nginx
+func (k *K8sAdapter) UpdateNginxConfig(namespace, configMapName string, config *NginxConfig) error {
+	// Получаем текущий ConfigMap
+	configMap, err := k.clientset.CoreV1().ConfigMaps(namespace).Get(k.ctx, configMapName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("ошибка при получении ConfigMap: %w", err)
+	}
+
+	// Формируем новую конфигурацию nginx
+	nginxConf := fmt.Sprintf(`user nginx;
+worker_processes %s;
+error_log /var/log/nginx/error.log;
+pid /var/run/nginx.pid;
+
+events {
+	worker_connections %s;
+}
+
+http {
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+	sendfile on;
+	keepalive_timeout %s;
+
+	server {
+		listen 80;
+		server_name %s;
+
+		location / {
+			root %s;
+			index %s;
+		}
+	}
+}`, config.WorkerProcesses, config.WorkerConnections, config.KeepaliveTimeout,
+		config.ServerName, config.RootPath, config.IndexFile)
+
+	// Обновляем ConfigMap
+	configMap.Data["nginx.conf"] = nginxConf
+
+	// Сохраняем изменения
+	_, err = k.clientset.CoreV1().ConfigMaps(namespace).Update(k.ctx, configMap, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("ошибка при обновлении ConfigMap: %w", err)
+	}
+
+	return nil
+}
+
+// ListConfigMaps возвращает список всех ConfigMap в указанном namespace
+func (k *K8sAdapter) ListConfigMaps(namespace string) ([]ConfigMapListItem, error) {
+	configMaps, err := k.clientset.CoreV1().ConfigMaps(namespace).List(k.ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении списка ConfigMap: %w", err)
+	}
+
+	var items []ConfigMapListItem
+	for _, cm := range configMaps.Items {
+		keys := make([]string, 0, len(cm.Data))
+		for key := range cm.Data {
+			keys = append(keys, key)
+		}
+
+		items = append(items, ConfigMapListItem{
+			Name:      cm.Name,
+			Namespace: cm.Namespace,
+			Age:       time.Since(cm.CreationTimestamp.Time),
+			Keys:      keys,
+		})
+	}
+
+	return items, nil
+}
+
+// ListSecrets возвращает список всех секретов в указанном namespace
+func (k *K8sAdapter) ListSecrets(namespace string) ([]SecretListItem, error) {
+	secrets, err := k.clientset.CoreV1().Secrets(namespace).List(k.ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении списка секретов: %w", err)
+	}
+
+	var items []SecretListItem
+	for _, secret := range secrets.Items {
+		keys := make([]string, 0, len(secret.Data))
+		for key := range secret.Data {
+			keys = append(keys, key)
+		}
+
+		items = append(items, SecretListItem{
+			Name:      secret.Name,
+			Namespace: secret.Namespace,
+			Type:      string(secret.Type),
+			Age:       time.Since(secret.CreationTimestamp.Time),
+			Keys:      keys,
+		})
+	}
+
+	return items, nil
 }

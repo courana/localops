@@ -154,6 +154,7 @@ func (m *Menu) printCICDMenu() {
 	fmt.Println("5. Отменить сборку")
 	fmt.Println("6. Перезапустить сборку")
 	fmt.Println("7. Скачать артефакты")
+	fmt.Println("8. Создать/настроить .gitlab-ci.yml")
 	fmt.Println("0. Назад")
 	fmt.Print("Выберите пункт меню: ")
 }
@@ -166,6 +167,25 @@ func (m *Menu) printMonitoringMenu() {
 	fmt.Println("4. Проверка здоровья")
 	fmt.Println("0. Назад")
 	fmt.Print("Выберите пункт меню: ")
+}
+
+func (m *Menu) printConfigMenu() {
+	fmt.Println("\n=== Управление конфигурацией ===")
+	fmt.Println("1. Создать/обновить ConfigMap")
+	fmt.Println("2. Просмотреть ConfigMap")
+	fmt.Println("3. Настроить конфигурацию nginx")
+	fmt.Println("4. Список всех ConfigMap")
+	fmt.Println("0. Назад")
+	fmt.Print("Выберите действие: ")
+}
+
+func (m *Menu) printSecretMenu() {
+	fmt.Println("\n=== Управление секретами ===")
+	fmt.Println("1. Создать/обновить секрет")
+	fmt.Println("2. Просмотреть секрет")
+	fmt.Println("3. Список всех секретов")
+	fmt.Println("0. Назад")
+	fmt.Print("Выберите действие: ")
 }
 
 func (m *Menu) handleImageMenu() {
@@ -277,9 +297,9 @@ func (m *Menu) handleKubernetesMenu() {
 		case "6":
 			m.deleteResource()
 		case "7":
-			m.manageConfigMap()
+			m.handleConfigMenu()
 		case "8":
-			m.manageSecret()
+			m.handleSecretMenu()
 		case "0":
 			return
 		default:
@@ -308,6 +328,8 @@ func (m *Menu) handleCICDMenu() {
 			m.retryPipeline()
 		case "7":
 			m.downloadArtifacts()
+		case "8":
+			m.configureGitLabCI()
 		case "0":
 			return
 		default:
@@ -330,6 +352,48 @@ func (m *Menu) handleMonitoringMenu() {
 			m.listMetrics()
 		case "4":
 			m.showServiceHealth()
+		case "0":
+			return
+		default:
+			fmt.Println("Неверный выбор")
+		}
+	}
+}
+
+func (m *Menu) handleConfigMenu() {
+	for {
+		m.printConfigMenu()
+		choice := m.readInput()
+
+		switch choice {
+		case "1":
+			m.createOrUpdateConfigMap()
+		case "2":
+			m.viewConfigMap()
+		case "3":
+			m.configureNginx()
+		case "4":
+			m.listConfigMaps()
+		case "0":
+			return
+		default:
+			fmt.Println("Неверный выбор")
+		}
+	}
+}
+
+func (m *Menu) handleSecretMenu() {
+	for {
+		m.printSecretMenu()
+		choice := m.readInput()
+
+		switch choice {
+		case "1":
+			m.createOrUpdateSecret()
+		case "2":
+			m.viewSecret()
+		case "3":
+			m.listSecrets()
 		case "0":
 			return
 		default:
@@ -813,81 +877,77 @@ func (m *Menu) listServicesAndIngresses() {
 }
 
 func (m *Menu) deleteResource() {
-	fmt.Print("Введите тип ресурса (pod/deployment/service): ")
-	resourceType := m.readInput()
-	fmt.Print("Введите имя ресурса: ")
-	name := m.readInput()
+	fmt.Println("\nДоступные типы ресурсов:")
+	fmt.Println("1. Pod")
+	fmt.Println("2. Deployment")
+	fmt.Println("3. Service")
+	fmt.Println("4. ConfigMap")
+	fmt.Print("Выберите тип ресурса (1-4): ")
+
+	choice := m.readInput()
+	var resourceType string
+	var name string
+
+	switch choice {
+	case "1":
+		resourceType = "pod"
+	case "2":
+		resourceType = "deployment"
+	case "3":
+		resourceType = "service"
+	case "4":
+		resourceType = "configmap"
+	default:
+		fmt.Println("Неверный выбор")
+		return
+	}
+
+	// Если выбран ConfigMap, показываем список доступных ConfigMap
+	if resourceType == "configmap" {
+		configMaps, err := m.k8sAdapter.ListConfigMaps("default")
+		if err != nil {
+			fmt.Printf("Ошибка при получении списка ConfigMap: %v\n", err)
+			return
+		}
+
+		if len(configMaps) == 0 {
+			fmt.Println("ConfigMap не найдены в namespace default")
+			return
+		}
+
+		fmt.Println("\nДоступные ConfigMap:")
+		for i, cm := range configMaps {
+			fmt.Printf("%d. %s (ключи: %v)\n", i+1, cm.Name, cm.Keys)
+		}
+
+		fmt.Print("\nВыберите номер ConfigMap для удаления: ")
+		numStr := m.readInput()
+		num, err := strconv.Atoi(numStr)
+		if err != nil || num < 1 || num > len(configMaps) {
+			fmt.Println("Неверный номер")
+			return
+		}
+
+		name = configMaps[num-1].Name
+	} else {
+		fmt.Print("Введите имя ресурса: ")
+		name = m.readInput()
+	}
+
+	// Запрашиваем подтверждение
+	fmt.Printf("\nВы уверены, что хотите удалить %s '%s'? (y/N): ", resourceType, name)
+	confirm := m.readInput()
+	if strings.ToLower(confirm) != "y" {
+		fmt.Println("Удаление отменено")
+		return
+	}
 
 	err := m.k8sAdapter.DeleteResource("default", resourceType, name)
 	if err != nil {
 		fmt.Printf("Ошибка при удалении ресурса: %v\n", err)
 		return
 	}
-	fmt.Println("Ресурс успешно удален")
-}
-
-func (m *Menu) manageConfigMap() {
-	fmt.Println("\n=== Управление ConfigMap ===")
-	fmt.Println("1. Создать/обновить ConfigMap")
-	fmt.Println("2. Просмотреть ConfigMap")
-	fmt.Println("0. Назад")
-	fmt.Print("Выберите действие: ")
-
-	choice := m.readInput()
-	switch choice {
-	case "1":
-		m.createOrUpdateConfigMap()
-	case "2":
-		m.viewConfigMap()
-	case "0":
-		return
-	default:
-		fmt.Println("Неверный выбор")
-	}
-}
-
-func (m *Menu) createOrUpdateConfigMap() {
-	fmt.Print("Введите имя ConfigMap: ")
-	name := m.readInput()
-
-	data := make(map[string]string)
-	fmt.Println("Введите данные (формат: KEY=VALUE, пустая строка для завершения):")
-	for {
-		line := m.readInput()
-		if line == "" {
-			break
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			data[parts[0]] = parts[1]
-		}
-	}
-
-	err := m.k8sAdapter.CreateOrUpdateConfigMap("default", name, data)
-	if err != nil {
-		fmt.Printf("Ошибка при создании/обновлении ConfigMap: %v\n", err)
-		return
-	}
-	fmt.Println("ConfigMap успешно создан/обновлен")
-}
-
-func (m *Menu) viewConfigMap() {
-	fmt.Print("Введите имя ConfigMap: ")
-	name := m.readInput()
-
-	info, err := m.k8sAdapter.GetConfigMapInfo("default", name)
-	if err != nil {
-		fmt.Printf("Ошибка при получении информации о ConfigMap: %v\n", err)
-		return
-	}
-
-	fmt.Printf("\nConfigMap: %s\n", info.Name)
-	fmt.Printf("Namespace: %s\n", info.Namespace)
-	fmt.Printf("Возраст: %s\n", info.Age.Round(time.Second))
-	fmt.Println("\nДанные:")
-	for key, value := range info.Data {
-		fmt.Printf("%s: %s\n", key, value)
-	}
+	fmt.Printf("%s '%s' успешно удален\n", resourceType, name)
 }
 
 func (m *Menu) manageSecret() {
@@ -911,14 +971,32 @@ func (m *Menu) manageSecret() {
 }
 
 func (m *Menu) createOrUpdateSecret() {
-	fmt.Print("Введите имя Secret: ")
+	fmt.Print("Введите имя секрета: ")
 	name := m.readInput()
 
-	fmt.Print("Введите тип Secret (Opaque/kubernetes.io/tls/kubernetes.io/dockerconfigjson): ")
-	secretType := m.readInput()
+	fmt.Println("\nДоступные типы секретов:")
+	fmt.Println("1. Opaque (обычный секрет)")
+	fmt.Println("2. kubernetes.io/tls (TLS сертификат)")
+	fmt.Println("3. kubernetes.io/dockerconfigjson (Docker Registry)")
+	fmt.Print("Выберите тип секрета (1-3): ")
+
+	choice := m.readInput()
+	var secretType string
+
+	switch choice {
+	case "1":
+		secretType = "Opaque"
+	case "2":
+		secretType = "kubernetes.io/tls"
+	case "3":
+		secretType = "kubernetes.io/dockerconfigjson"
+	default:
+		fmt.Println("Неверный выбор")
+		return
+	}
 
 	data := make(map[string][]byte)
-	fmt.Println("Введите данные (формат: KEY=VALUE, пустая строка для завершения):")
+	fmt.Println("\nВведите данные (формат: KEY=VALUE, пустая строка для завершения):")
 	for {
 		line := m.readInput()
 		if line == "" {
@@ -932,27 +1010,73 @@ func (m *Menu) createOrUpdateSecret() {
 
 	err := m.k8sAdapter.CreateOrUpdateSecret("default", name, secretType, data)
 	if err != nil {
-		fmt.Printf("Ошибка при создании/обновлении Secret: %v\n", err)
+		fmt.Printf("Ошибка при создании/обновлении секрета: %v\n", err)
 		return
 	}
-	fmt.Println("Secret успешно создан/обновлен")
+	fmt.Println("Секрет успешно создан/обновлен")
 }
 
 func (m *Menu) viewSecret() {
-	fmt.Print("Введите имя Secret: ")
-	name := m.readInput()
-
-	info, err := m.k8sAdapter.GetSecretInfo("default", name)
+	// Сначала показываем список секретов
+	secrets, err := m.k8sAdapter.ListSecrets("default")
 	if err != nil {
-		fmt.Printf("Ошибка при получении информации о Secret: %v\n", err)
+		fmt.Printf("Ошибка при получении списка секретов: %v\n", err)
 		return
 	}
 
-	fmt.Printf("\nSecret: %s\n", info.Name)
+	if len(secrets) == 0 {
+		fmt.Println("Секреты не найдены в namespace default")
+		return
+	}
+
+	fmt.Println("\nДоступные секреты:")
+	for i, secret := range secrets {
+		fmt.Printf("%d. %s (тип: %s, ключи: %v)\n", i+1, secret.Name, secret.Type, secret.Keys)
+	}
+
+	fmt.Print("\nВыберите номер секрета для просмотра: ")
+	numStr := m.readInput()
+	num, err := strconv.Atoi(numStr)
+	if err != nil || num < 1 || num > len(secrets) {
+		fmt.Println("Неверный номер")
+		return
+	}
+
+	name := secrets[num-1].Name
+	info, err := m.k8sAdapter.GetSecretInfo("default", name)
+	if err != nil {
+		fmt.Printf("Ошибка при получении информации о секрете: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\nСекрет: %s\n", info.Name)
 	fmt.Printf("Namespace: %s\n", info.Namespace)
 	fmt.Printf("Тип: %s\n", info.Type)
 	fmt.Printf("Возраст: %s\n", info.Age.Round(time.Second))
 	fmt.Printf("Ключи: %v\n", info.Keys)
+}
+
+func (m *Menu) listSecrets() {
+	secrets, err := m.k8sAdapter.ListSecrets("default")
+	if err != nil {
+		fmt.Printf("Ошибка при получении списка секретов: %v\n", err)
+		return
+	}
+
+	if len(secrets) == 0 {
+		fmt.Println("Секреты не найдены в namespace default")
+		return
+	}
+
+	fmt.Println("\nСписок секретов:")
+	for _, secret := range secrets {
+		fmt.Printf("\nИмя: %s\n", secret.Name)
+		fmt.Printf("Namespace: %s\n", secret.Namespace)
+		fmt.Printf("Тип: %s\n", secret.Type)
+		fmt.Printf("Возраст: %s\n", secret.Age.Round(time.Second))
+		fmt.Printf("Ключи: %v\n", secret.Keys)
+		fmt.Println("---")
+	}
 }
 
 // CI/CD методы
@@ -1243,6 +1367,190 @@ func (m *Menu) restartContainer() {
 		return
 	}
 	fmt.Println("Контейнер успешно перезапущен")
+}
+
+func (m *Menu) configureNginx() {
+	fmt.Print("Введите имя ConfigMap (по умолчанию nginx-config): ")
+	name := m.readInput()
+	if name == "" {
+		name = "nginx-config"
+	}
+
+	// Получаем текущую конфигурацию
+	config, err := m.k8sAdapter.GetNginxConfig("default", name)
+	if err != nil {
+		fmt.Printf("Ошибка при получении конфигурации: %v\n", err)
+		return
+	}
+
+	fmt.Println("\nТекущая конфигурация nginx:")
+	fmt.Printf("1. Количество рабочих процессов: %s\n", config.WorkerProcesses)
+	fmt.Printf("2. Максимальное количество соединений: %s\n", config.WorkerConnections)
+	fmt.Printf("3. Таймаут keepalive: %s\n", config.KeepaliveTimeout)
+	fmt.Printf("4. Имя сервера: %s\n", config.ServerName)
+	fmt.Printf("5. Путь к корневой директории: %s\n", config.RootPath)
+	fmt.Printf("6. Файл индекса: %s\n", config.IndexFile)
+
+	fmt.Println("\nВыберите параметр для изменения (1-6) или 0 для выхода:")
+	choice := m.readInput()
+
+	switch choice {
+	case "1":
+		fmt.Print("Введите новое количество рабочих процессов (например, auto или число): ")
+		config.WorkerProcesses = m.readInput()
+	case "2":
+		fmt.Print("Введите новое максимальное количество соединений: ")
+		config.WorkerConnections = m.readInput()
+	case "3":
+		fmt.Print("Введите новый таймаут keepalive (в секундах): ")
+		config.KeepaliveTimeout = m.readInput()
+	case "4":
+		fmt.Print("Введите новое имя сервера: ")
+		config.ServerName = m.readInput()
+	case "5":
+		fmt.Print("Введите новый путь к корневой директории: ")
+		config.RootPath = m.readInput()
+	case "6":
+		fmt.Print("Введите новое имя файла индекса: ")
+		config.IndexFile = m.readInput()
+	case "0":
+		return
+	default:
+		fmt.Println("Неверный выбор")
+		return
+	}
+
+	// Обновляем конфигурацию
+	err = m.k8sAdapter.UpdateNginxConfig("default", name, config)
+	if err != nil {
+		fmt.Printf("Ошибка при обновлении конфигурации: %v\n", err)
+		return
+	}
+
+	fmt.Println("Конфигурация успешно обновлена")
+	fmt.Println("Для применения изменений может потребоваться перезапуск подов")
+}
+
+func (m *Menu) createOrUpdateConfigMap() {
+	fmt.Print("Введите имя ConfigMap: ")
+	name := m.readInput()
+
+	data := make(map[string]string)
+	fmt.Println("Введите данные (формат: KEY=VALUE, пустая строка для завершения):")
+	for {
+		line := m.readInput()
+		if line == "" {
+			break
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			data[parts[0]] = parts[1]
+		}
+	}
+
+	err := m.k8sAdapter.CreateOrUpdateConfigMap("default", name, data)
+	if err != nil {
+		fmt.Printf("Ошибка при создании/обновлении ConfigMap: %v\n", err)
+		return
+	}
+	fmt.Println("ConfigMap успешно создан/обновлен")
+}
+
+func (m *Menu) viewConfigMap() {
+	fmt.Print("Введите имя ConfigMap: ")
+	name := m.readInput()
+
+	info, err := m.k8sAdapter.GetConfigMapInfo("default", name)
+	if err != nil {
+		fmt.Printf("Ошибка при получении информации о ConfigMap: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\nConfigMap: %s\n", info.Name)
+	fmt.Printf("Namespace: %s\n", info.Namespace)
+	fmt.Printf("Возраст: %s\n", info.Age.Round(time.Second))
+	fmt.Println("\nДанные:")
+	for key, value := range info.Data {
+		fmt.Printf("%s: %s\n", key, value)
+	}
+}
+
+func (m *Menu) listConfigMaps() {
+	configMaps, err := m.k8sAdapter.ListConfigMaps("default")
+	if err != nil {
+		fmt.Printf("Ошибка при получении списка ConfigMap: %v\n", err)
+		return
+	}
+
+	if len(configMaps) == 0 {
+		fmt.Println("ConfigMap не найдены в namespace default")
+		return
+	}
+
+	fmt.Println("\nСписок ConfigMap:")
+	for _, cm := range configMaps {
+		fmt.Printf("\nИмя: %s\n", cm.Name)
+		fmt.Printf("Namespace: %s\n", cm.Namespace)
+		fmt.Printf("Возраст: %s\n", cm.Age.Round(time.Second))
+		fmt.Printf("Ключи: %v\n", cm.Keys)
+		fmt.Println("---")
+	}
+}
+
+func (m *Menu) configureGitLabCI() {
+	fmt.Println("\n=== Настройка .gitlab-ci.yml ===")
+	fmt.Println("1. Создать/обновить .gitlab-ci.yml")
+	fmt.Println("2. Просмотреть текущий .gitlab-ci.yml")
+	fmt.Println("0. Назад")
+	fmt.Print("Выберите действие: ")
+
+	choice := m.readInput()
+	switch choice {
+	case "1":
+		m.createOrUpdateGitLabCI()
+	case "2":
+		m.viewGitLabCI()
+	case "0":
+		return
+	default:
+		fmt.Println("Неверный выбор")
+	}
+}
+
+func (m *Menu) createOrUpdateGitLabCI() {
+	fmt.Print("Введите имя .gitlab-ci.yml: ")
+	name := m.readInput()
+
+	data := make(map[string]string)
+	fmt.Println("Введите данные (формат: KEY=VALUE, пустая строка для завершения):")
+	for {
+		line := m.readInput()
+		if line == "" {
+			break
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			data[parts[0]] = parts[1]
+		}
+	}
+
+	err := m.cicdAdapter.CreateOrUpdateGitLabCI(name, data)
+	if err != nil {
+		fmt.Printf("Ошибка при создании/обновлении .gitlab-ci.yml: %v\n", err)
+		return
+	}
+	fmt.Println("Файл .gitlab-ci.yml успешно создан/обновлен")
+}
+
+func (m *Menu) viewGitLabCI() {
+	content, err := m.cicdAdapter.GetGitLabCI()
+	if err != nil {
+		fmt.Printf("Ошибка при получении содержимого .gitlab-ci.yml: %v\n", err)
+		return
+	}
+
+	fmt.Println("\nСодержимое .gitlab-ci.yml:")
+	fmt.Println(content)
 }
 
 func main() {

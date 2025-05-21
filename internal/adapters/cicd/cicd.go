@@ -28,7 +28,6 @@ type PipelineStatus struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 	Duration  time.Duration
-	Commit    string
 	Branch    string
 	Author    string
 	Message   string
@@ -36,17 +35,24 @@ type PipelineStatus struct {
 
 // gitlabPipeline представляет ответ от GitLab API
 type gitlabPipeline struct {
-	ID        int       `json:"id"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"finished_at"`
-	Duration  int       `json:"duration"`
+	ID        int        `json:"id"`
+	Status    string     `json:"status"`
+	StartedAt *time.Time `json:"started_at"`
+	EndedAt   *time.Time `json:"finished_at"`
+	Duration  *int       `json:"duration"`
+	Ref       string     `json:"ref"`
+	User      struct {
+		Name string `json:"name"`
+	} `json:"user"`
+	DetailedStatus struct {
+		Text string `json:"text"`
+	} `json:"detailed_status"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 	Commit    struct {
-		ID      string `json:"id"`
 		Message string `json:"message"`
 		Author  string `json:"author_name"`
 	} `json:"commit"`
-	Ref string `json:"ref"`
 }
 
 // PipelineJob содержит информацию о задаче в пайплайне
@@ -139,15 +145,11 @@ func (a *CICDAdapter) TriggerPipeline(ctx context.Context, project string, ref s
 	}
 
 	return &PipelineStatus{
-		ID:        strconv.Itoa(glPipeline.ID),
-		Status:    glPipeline.Status,
-		StartedAt: glPipeline.StartedAt,
-		EndedAt:   glPipeline.EndedAt,
-		Duration:  time.Duration(glPipeline.Duration) * time.Second,
-		Commit:    glPipeline.Commit.ID,
-		Branch:    glPipeline.Ref,
-		Author:    glPipeline.Commit.Author,
-		Message:   glPipeline.Commit.Message,
+		ID:      strconv.Itoa(glPipeline.ID),
+		Status:  glPipeline.DetailedStatus.Text,
+		Branch:  glPipeline.Ref,
+		Author:  glPipeline.User.Name,
+		Message: glPipeline.Commit.Message,
 	}, nil
 }
 
@@ -160,74 +162,173 @@ func (a *CICDAdapter) GetPipelineStatus(ctx context.Context, project string, pip
 	}
 	defer resp.Body.Close()
 
+	// Читаем тело ответа для отладки
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа: %w", err)
+	}
+
+	// Создаем новый Reader для декодирования JSON
+	reader := bytes.NewReader(body)
 	var glPipeline gitlabPipeline
-	if err := json.NewDecoder(resp.Body).Decode(&glPipeline); err != nil {
+	if err := json.NewDecoder(reader).Decode(&glPipeline); err != nil {
 		return nil, fmt.Errorf("ошибка разбора ответа: %w", err)
 	}
 
-	return &PipelineStatus{
-		ID:        strconv.Itoa(glPipeline.ID),
-		Status:    glPipeline.Status,
-		StartedAt: glPipeline.StartedAt,
-		EndedAt:   glPipeline.EndedAt,
-		Duration:  time.Duration(glPipeline.Duration) * time.Second,
-		Commit:    glPipeline.Commit.ID,
-		Branch:    glPipeline.Ref,
-		Author:    glPipeline.Commit.Author,
-		Message:   glPipeline.Commit.Message,
-	}, nil
+	// Проверяем, что все необходимые поля заполнены
+	if glPipeline.ID == 0 {
+		return nil, fmt.Errorf("неверный ID пайплайна")
+	}
+
+	// Создаем базовый статус
+	status := &PipelineStatus{
+		ID:      strconv.Itoa(glPipeline.ID),
+		Status:  glPipeline.Status,
+		Branch:  glPipeline.Ref,
+		Author:  glPipeline.User.Name,
+		Message: glPipeline.Commit.Message,
+	}
+
+	// Обработка времени начала
+	if glPipeline.StartedAt != nil {
+		status.StartedAt = *glPipeline.StartedAt
+	} else if glPipeline.CreatedAt != "" {
+		if created, err := time.Parse(time.RFC3339, glPipeline.CreatedAt); err == nil {
+			status.StartedAt = created
+		}
+	}
+
+	// Обработка времени окончания
+	if glPipeline.EndedAt != nil {
+		status.EndedAt = *glPipeline.EndedAt
+	}
+
+	// Обработка длительности
+	if glPipeline.Duration != nil {
+		status.Duration = time.Duration(*glPipeline.Duration) * time.Second
+	} else if !status.StartedAt.IsZero() && !status.EndedAt.IsZero() {
+		status.Duration = status.EndedAt.Sub(status.StartedAt)
+	}
+
+	// Если автор не указан, используем имя из коммита
+	if status.Author == "" && glPipeline.Commit.Author != "" {
+		status.Author = glPipeline.Commit.Author
+	}
+
+	// Если сообщение не указано, используем текст из detailed_status
+	if status.Message == "" && glPipeline.DetailedStatus.Text != "" {
+		status.Message = glPipeline.DetailedStatus.Text
+	}
+
+	return status, nil
 }
 
 // ListPipelineJobs возвращает список задач в пайплайне
 func (c *CICDAdapter) ListPipelineJobs(ctx context.Context, projectID, pipelineID string) ([]PipelineJob, error) {
-	// Здесь должна быть реализация получения списка задач
-	// Для примера возвращаем заглушку
-	return []PipelineJob{
-		{
-			ID:        "job1",
-			Name:      "build",
-			Status:    "success",
-			Stage:     "build",
-			StartedAt: time.Now().Add(-time.Hour),
-			EndedAt:   time.Now(),
-			Duration:  time.Hour,
-		},
-	}, nil
+	path := fmt.Sprintf("/projects/%s/pipelines/%s/jobs", projectID, pipelineID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var jobs []struct {
+		ID        int       `json:"id"`
+		Name      string    `json:"name"`
+		Status    string    `json:"status"`
+		Stage     string    `json:"stage"`
+		StartedAt time.Time `json:"started_at"`
+		EndedAt   time.Time `json:"finished_at"`
+		Duration  int       `json:"duration"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		return nil, fmt.Errorf("ошибка разбора ответа: %w", err)
+	}
+
+	var result []PipelineJob
+	for _, job := range jobs {
+		result = append(result, PipelineJob{
+			ID:        strconv.Itoa(job.ID),
+			Name:      job.Name,
+			Status:    job.Status,
+			Stage:     job.Stage,
+			StartedAt: job.StartedAt,
+			EndedAt:   job.EndedAt,
+			Duration:  time.Duration(job.Duration) * time.Second,
+		})
+	}
+
+	return result, nil
 }
 
 // GetJobLogs возвращает логи задачи
 func (c *CICDAdapter) GetJobLogs(ctx context.Context, projectID, jobID string) (string, error) {
-	// Здесь должна быть реализация получения логов
-	// Для примера возвращаем заглушку
-	return "Build started...\nBuild completed successfully", nil
+	path := fmt.Sprintf("/projects/%s/jobs/%s/trace", projectID, jobID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	logs, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("ошибка чтения логов: %w", err)
+	}
+
+	return string(logs), nil
 }
 
 // CancelPipeline отменяет выполняющийся пайплайн
 func (c *CICDAdapter) CancelPipeline(ctx context.Context, projectID, pipelineID string) error {
-	// Здесь должна быть реализация отмены пайплайна
+	path := fmt.Sprintf("/projects/%s/pipelines/%s/cancel", projectID, pipelineID)
+	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
 	return nil
 }
 
 // RetryPipeline перезапускает упавший пайплайн
 func (c *CICDAdapter) RetryPipeline(ctx context.Context, projectID, pipelineID string) error {
-	// Здесь должна быть реализация перезапуска пайплайна
+	path := fmt.Sprintf("/projects/%s/pipelines/%s/retry", projectID, pipelineID)
+	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
 	return nil
 }
 
 // DownloadArtifacts скачивает артефакты сборки
 func (c *CICDAdapter) DownloadArtifacts(ctx context.Context, projectID, jobID, outputPath string) error {
-	// Здесь должна быть реализация скачивания артефактов
-	// Для примера создаем пустой файл
+	path := fmt.Sprintf("/projects/%s/jobs/%s/artifacts", projectID, jobID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Создаем директорию если не существует
 	dir := filepath.Dir(outputPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("ошибка при создании директории: %w", err)
 	}
 
+	// Создаем файл для сохранения артефактов
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("ошибка при создании файла: %w", err)
 	}
 	defer file.Close()
+
+	// Копируем данные из ответа в файл
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return fmt.Errorf("ошибка при сохранении артефактов: %w", err)
+	}
 
 	return nil
 }
@@ -241,4 +342,73 @@ type Pipeline struct {
 	Duration  time.Duration
 	Author    string
 	Message   string
+}
+
+// CreateOrUpdateGitLabCI создает или обновляет файл .gitlab-ci.yml
+func (c *CICDAdapter) CreateOrUpdateGitLabCI(name string, data map[string]string) error {
+	// Формируем базовую конфигурацию
+	config := `stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  DOCKER_IMAGE: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG}
+
+build:
+  stage: build
+  image: golang:1.21
+  script:
+    - go mod download
+    - go build -o app ./cmd/cli
+  artifacts:
+    paths:
+      - app
+
+test:
+  stage: test
+  image: golang:1.21
+  script:
+    - go test ./...
+
+deploy:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $DOCKER_IMAGE .
+    - docker push $DOCKER_IMAGE
+  only:
+    - main
+`
+
+	// Добавляем пользовательские переменные
+	if len(data) > 0 {
+		config += "\nvariables:\n"
+		for key, value := range data {
+			config += fmt.Sprintf("  %s: %s\n", key, value)
+		}
+	}
+
+	// Создаем файл
+	err := os.WriteFile(".gitlab-ci.yml", []byte(config), 0644)
+	if err != nil {
+		return fmt.Errorf("ошибка при создании файла: %w", err)
+	}
+
+	return nil
+}
+
+// GetGitLabCI возвращает содержимое файла .gitlab-ci.yml
+func (c *CICDAdapter) GetGitLabCI() (string, error) {
+	content, err := os.ReadFile(".gitlab-ci.yml")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("файл .gitlab-ci.yml не найден")
+		}
+		return "", fmt.Errorf("ошибка при чтении файла: %w", err)
+	}
+
+	return string(content), nil
 }
