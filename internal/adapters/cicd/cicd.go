@@ -73,9 +73,13 @@ type CICDAdapter struct {
 }
 
 // NewCICDAdapter создает новый экземпляр CICDAdapter
-func NewCICDAdapter(cfg Config) *CICDAdapter {
+func NewCICDAdapter(config Config) *CICDAdapter {
+	if config.BaseURL == "" {
+		config.BaseURL = "https://gitlab.com" // Устанавливаем значение по умолчанию
+	}
+
 	return &CICDAdapter{
-		config: cfg,
+		config: config,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -123,34 +127,102 @@ func (a *CICDAdapter) doRequest(ctx context.Context, method, path string, body i
 }
 
 // TriggerPipeline запускает новый пайплайн
-func (a *CICDAdapter) TriggerPipeline(ctx context.Context, project string, ref string) (*PipelineStatus, error) {
-	path := fmt.Sprintf("/projects/%s/pipeline", project)
+func (a *CICDAdapter) TriggerPipeline(ctx context.Context, projectID, ref string) (*Pipeline, error) {
+	if a.config.Token == "" {
+		return nil, fmt.Errorf("токен доступа не установлен")
+	}
+
+	url := fmt.Sprintf("%s/api/v4/projects/%s/pipeline", a.config.BaseURL, projectID)
+	fmt.Printf("Отправка запроса на URL: %s\n", url)
+
+	// Создаем тело запроса
 	body := map[string]string{
 		"ref": ref,
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка сериализации запроса: %w", err)
+		return nil, fmt.Errorf("ошибка сериализации запроса: %v", err)
+	}
+	fmt.Printf("Тело запроса: %s\n", string(jsonBody))
+
+	// Создаем запрос
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("ошибка создания запроса: %v", err)
 	}
 
-	resp, err := a.doRequest(ctx, http.MethodPost, path, bytes.NewBuffer(jsonBody))
+	// Добавляем заголовки
+	req.Header.Set("PRIVATE-TOKEN", a.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+	fmt.Printf("Заголовки запроса: %v\n", req.Header)
+
+	// Отправляем запрос
+	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка выполнения запроса: %v", err)
 	}
 	defer resp.Body.Close()
 
-	var glPipeline gitlabPipeline
-	if err := json.NewDecoder(resp.Body).Decode(&glPipeline); err != nil {
-		return nil, fmt.Errorf("ошибка разбора ответа: %w", err)
+	// Читаем тело ответа для отладки
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа: %v", err)
+	}
+	fmt.Printf("Статус ответа: %d\n", resp.StatusCode)
+	fmt.Printf("Тело ответа: %s\n", string(respBody))
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("ошибка API GitLab (статус %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	return &PipelineStatus{
-		ID:      strconv.Itoa(glPipeline.ID),
-		Status:  glPipeline.DetailedStatus.Text,
-		Branch:  glPipeline.Ref,
-		Author:  glPipeline.User.Name,
-		Message: glPipeline.Commit.Message,
-	}, nil
+	// Парсим ответ
+	var glPipeline gitlabPipeline
+	if err := json.Unmarshal(respBody, &glPipeline); err != nil {
+		return nil, fmt.Errorf("ошибка разбора ответа: %v", err)
+	}
+
+	// Создаем объект Pipeline с проверкой на nil
+	pipeline := &Pipeline{
+		ID:     strconv.Itoa(glPipeline.ID),
+		Status: glPipeline.Status,
+	}
+
+	// Безопасно обрабатываем время начала
+	if glPipeline.StartedAt != nil {
+		pipeline.StartedAt = *glPipeline.StartedAt
+	} else if glPipeline.CreatedAt != "" {
+		if created, err := time.Parse(time.RFC3339, glPipeline.CreatedAt); err == nil {
+			pipeline.StartedAt = created
+		}
+	}
+
+	// Безопасно обрабатываем время окончания
+	if glPipeline.EndedAt != nil {
+		pipeline.EndedAt = *glPipeline.EndedAt
+	}
+
+	// Безопасно обрабатываем длительность
+	if glPipeline.Duration != nil {
+		pipeline.Duration = time.Duration(*glPipeline.Duration) * time.Second
+	} else if !pipeline.StartedAt.IsZero() && !pipeline.EndedAt.IsZero() {
+		pipeline.Duration = pipeline.EndedAt.Sub(pipeline.StartedAt)
+	}
+
+	// Безопасно обрабатываем автора
+	if glPipeline.User.Name != "" {
+		pipeline.Author = glPipeline.User.Name
+	} else if glPipeline.Commit.Author != "" {
+		pipeline.Author = glPipeline.Commit.Author
+	}
+
+	// Безопасно обрабатываем сообщение
+	if glPipeline.Commit.Message != "" {
+		pipeline.Message = glPipeline.Commit.Message
+	} else if glPipeline.DetailedStatus.Text != "" {
+		pipeline.Message = glPipeline.DetailedStatus.Text
+	}
+
+	return pipeline, nil
 }
 
 // GetPipelineStatus возвращает статус пайплайна по его ID

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,10 +60,20 @@ func NewMenu() (*Menu, error) {
 		return nil, fmt.Errorf("ошибка при инициализации Kubernetes адаптера: %v", err)
 	}
 
-	// Инициализация CI/CD адаптера
+	// Инициализация CI/CD адаптера с проверкой переменных окружения
+	cicdBaseURL := os.Getenv("CICD_BASE_URL")
+	if cicdBaseURL == "" {
+		cicdBaseURL = "https://gitlab.com" // Значение по умолчанию
+	}
+
+	cicdToken := os.Getenv("CICD_TOKEN")
+	if cicdToken == "" {
+		fmt.Println("Предупреждение: CICD_TOKEN не установлен. CI/CD функции будут недоступны.")
+	}
+
 	cicdAdapter := cicd.NewCICDAdapter(cicd.Config{
-		BaseURL: os.Getenv("CICD_BASE_URL"),
-		Token:   os.Getenv("CICD_TOKEN"),
+		BaseURL: cicdBaseURL,
+		Token:   cicdToken,
 	})
 
 	return &Menu{
@@ -449,6 +460,11 @@ func (m *Menu) listImages() {
 		fmt.Printf("Ошибка при получении списка образов: %v\n", err)
 		return
 	}
+
+	// Сортировка образов по дате создания в обратном порядке
+	sort.Slice(images, func(i, j int) bool {
+		return images[i].Created.After(images[j].Created)
+	})
 
 	fmt.Println("\nСписок образов:")
 	for _, img := range images {
@@ -1081,6 +1097,11 @@ func (m *Menu) listSecrets() {
 
 // CI/CD методы
 func (m *Menu) triggerPipeline() {
+	if m.cicdAdapter == nil {
+		fmt.Println("Ошибка: CI/CD адаптер не инициализирован")
+		return
+	}
+
 	fmt.Print("Введите ID проекта: ")
 	projectID := m.readInput()
 	fmt.Print("Введите ветку или тег: ")

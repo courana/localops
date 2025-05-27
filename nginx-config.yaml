@@ -5,28 +5,33 @@ metadata:
   namespace: default
 data:
   nginx.conf: |
-    user nginx;
-    worker_processes auto;
-    error_log /var/log/nginx/error.log;
-    pid /var/run/nginx.pid;
-
+    user  nginx;
+    worker_processes  auto;
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
     events {
-        worker_connections 1024;
+        worker_connections  1024;
     }
-
     http {
-        include /etc/nginx/mime.types;
-        default_type application/octet-stream;
-        sendfile on;
-        keepalive_timeout 65;
-
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+        access_log  /var/log/nginx/access.log  main;
+        sendfile        on;
+        keepalive_timeout  65;
+        include /etc/nginx/conf.d/*.conf;
         server {
-            listen 80;
-            server_name localhost;
-
+            listen       80;
+            server_name  localhost;
             location / {
-                root /usr/share/nginx/html;
-                index index.html;
+                root   /usr/share/nginx/html;
+                index  index.html index.htm;
+            }
+            error_page   500 502 503 504  /50x.html;
+            location = /50x.html {
+                root   /usr/share/nginx/html;
             }
         }
     }
@@ -35,9 +40,22 @@ data:
     <html>
     <head>
         <title>Welcome to nginx!</title>
+        <style>
+            body {
+                width: 35em;
+                margin: 0 auto;
+                font-family: Tahoma, Verdana, Arial, sans-serif;
+            }
+        </style>
     </head>
     <body>
         <h1>Welcome to nginx!</h1>
-        <p>This is a test page.</p>
+        <p>If you see this page, the nginx web server is successfully installed and
+        working. Further configuration is required.</p>
+        <p>For online documentation and support please refer to
+        <a href="http://nginx.org/">nginx.org</a>.<br/>
+        Commercial support is available at
+        <a href="http://nginx.com/">nginx.com</a>.</p>
+        <p><em>Thank you for using nginx.</em></p>
     </body>
     </html> 
